@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -67,6 +68,24 @@ func createListing(filespecs []FileSpec) map[string][]*ListEntry {
 				res[group] = append(res[group], entry)
 				allFiles[entry.Path] = true
 			}
+		case "dir":
+			// Serve every file under the directory, recursively.
+			filepath.WalkDir(spec.Path, func(p string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return nil
+				}
+				entry := fileInfo(p)
+				if spec.Alias != "" {
+					entry.Alias = path.Join(spec.Alias, path.Base(entry.Path))
+				} else {
+					cwd, _ := os.Getwd()
+					rel, _ := filepath.Rel(cwd, entry.Path)
+					entry.Alias = rel
+				}
+				res[group] = append(res[group], entry)
+				allFiles[entry.Path] = true
+				return nil
+			})
 		}
 	}
 
@@ -76,4 +95,15 @@ func createListing(filespecs []FileSpec) map[string][]*ListEntry {
 func fileAllowed(path string) bool {
 	_, ok := allFiles[path]
 	return ok
+}
+
+// allowedFiles returns the sorted list of all served files. It backs the "all
+// files" stream mode, which tails every file at once.
+func allowedFiles() []string {
+	files := make([]string, 0, len(allFiles))
+	for p := range allFiles {
+		files = append(files, p)
+	}
+	sort.Strings(files)
+	return files
 }

@@ -4,41 +4,48 @@
 
 # Tailon
 
-[![GoDoc](https://godoc.org/github.com/gvalkov/tailon?status.svg)](https://godoc.org/github.com/gvalkov/tailon)
-[![Go Report Card](https://goreportcard.com/badge/github.com/gvalkov/tailon)](https://goreportcard.com/report/github.com/gvalkov/tailon)
-[![Apache License](https://img.shields.io/badge/license-Apache-blue.svg)](https://github.com/gvalkov/tailon/blob/master/LICENSE)
-[![GitHub release](https://img.shields.io/github/release/gvalkov/tailon.svg)](https://github.com/gvalkov/tailon/releases)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tbocek/tailon)](https://goreportcard.com/report/github.com/tbocek/tailon)
+[![Apache License](https://img.shields.io/badge/license-Apache-blue.svg)](https://github.com/tbocek/tailon/blob/main/LICENSE)
 
-Tailon is a webapp for looking at and searching through files and streams. In a
-nutshell, it is a web wrapper around the following commands:
+> **This is a fork of [gvalkov/tailon].** It modernizes the project and strips it
+> down to **zero third-party dependencies**: the frontend assets are embedded with
+> Go's `embed` package (no code generation), the web UI was rewritten as
+> framework-free vanilla HTML/CSS/JavaScript that streams over **Server-Sent
+> Events** (replacing the Vue.js + SockJS frontend), the config file was dropped
+> in favor of command-line flags, the Python integration tests were removed, and
+> releases are produced by a small [`release.sh`](release.sh) plus GitHub Actions
+> instead of GoReleaser.
 
-```
-tail -f
-tail -f | grep
-tail -f | awk
-tail -f | sed
-```
+Tailon is a webapp for looking at and searching through log files from your
+browser. It serves files — single files, globs or whole directories — and lets
+you **tail** them live or **grep** through them, with a regular-expression
+filter (which can be inverted). Reading, following and filtering are all done
+natively in Go; tailon never shells out to `tail`, `grep` or any other tool.
 
 ## Install
 
-Download a build for your platform from the [releases] page or install using `go get`:
+Install the latest release binary for your OS and architecture (Linux and
+macOS, Intel and Apple Silicon). The script installs to `/usr/local/bin`, or
+`~/.local/bin` when that isn't writable:
 
 ```
-go get -u github.com/gvalkov/tailon
+curl -sL https://raw.githubusercontent.com/tbocek/tailon/main/install.sh | bash
 ```
 
-A container image is also available:
+Or install from source with Go (1.26+):
 
 ```
-docker run --rm gvalkov/tailon --help
+go install github.com/tbocek/tailon@latest
 ```
+
+Prebuilt binaries are also attached to every entry on the [releases] page.
 
 ## Usage
 
-Tailon is a webapp that streams the output of commands such as `tail` and
-`grep`. It can be configured with command-line flags or with a [toml] config
-file. Some options, like adding new commands, are only available through the
-configuration file.
+Each file can be viewed in two modes — **tail** (follow the file live, like
+`tail -f`) or **grep** (read the whole file from the start) — and narrowed with
+an optional regular-expression **filter** that can be inverted (both set in the
+UI). Tailon itself is configured entirely with command-line flags.
 
 To get started, run tailon with the list of files that you wish to monitor.
 
@@ -46,26 +53,50 @@ To get started, run tailon with the list of files that you wish to monitor.
 tailon /var/log/apache/access.log /var/log/apache/error.log /var/log/messages
 ```
 
-Tailon can serve single files, globs or whole directory trees. Tailon’s
-server-side functionality is summarized entirely in its help message:
+Tailon can serve single files, globs or whole directory trees.
 
-[//]: # (run "make README.md" to update the next section with the output of tailon --help)
+The web UI's file selector includes an **All files** entry (selected by default)
+that streams every served file at once, each line prefixed by its file and the
+streams **merged in timestamp order**. Several common formats are recognized at
+(or near) the start of each line — ISO 8601 / RFC 3339, `YYYY-MM-DD HH:MM:SS`,
+slash-separated dates, Apache/CLF, Unix `ctime` and syslog (RFC 3164). The format
+is detected per file from its first lines (not guessed from a single one), and a
+line without a recognizable timestamp keeps its file's previous one, so
+multi-line entries stay together. Handy when you're watching logs from many
+hosts together.
+
+### Example: central syslog server
+
+A common deployment is a host that aggregates logs from many machines via
+[syslog-ng] (or rsyslog) into a directory tree such as `/var/log/remote`. Point
+tailon at the directory to serve everything under it recursively:
+
+```
+tailon /var/log/remote/
+```
+
+Or use a glob with `group=`/`alias=` to organize the file picker by host:
+
+```
+tailon "group=hosts,/var/log/remote/*/*.log"
+```
+
+Tailon's server-side functionality is summarized entirely in its help message:
+
+[//]: # (run "./tailon --help" to update the next section)
 
 [//]: # (BEGIN HELP_USAGE)
 ```
-Usage: tailon -c <config file>
 Usage: tailon [options] <filespec> [<filespec> ...]
 
 Tailon is a webapp for searching through files and streams.
 
   -a, --allow-download         Allow file downloads (default true)
   -b, --bind string            Address and port to listen on (default ":8080")
-  -c, --config string          Path to TOML configuration file
   -h, --help                   Show this help message and exit
-  -e, --help-config            Show configuration file help and exit
   -r, --relative-root string   Webapp relative root (default "/")
 
-Tailon can be configured via a TOML config file or command-line flags.
+Tailon is configured entirely through command-line flags.
 
 The command-line interface expects one or more <filespec> arguments, which
 specify the files to serve. The format is:
@@ -94,128 +125,40 @@ If a directory is given, all files under it are served recursively.
 Example usage:
   tailon file1.txt file2.txt file3.txt
   tailon alias=messages,/var/log/messages "/var/log/*.log"
-  tailon -b localhost:8080,localhost:8081 -c config.toml
-
-See "--help-config" for configuration file usage.
+  tailon -b localhost:8080,localhost:8081 /var/log/messages
 ```
 [//]: # (END HELP_USAGE)
 
-[//]: # (BEGIN HELP_CONFIG)
-```
-The following options can be set through the config file:
-
-  # The <title> element of the of the webapp.
-  title = "Tailon file viewer"
-
-  # The root of the web application.
-  relative-root = "/"
-
-  # The addresses to listen on. Can be an address:port combination or an unix socket.
-  listen-addr = [":8080"]
-
-  # Allow downloading of known files (i.e those matched by a filespec).
-  allow-download = true
-
-  # Commands that will appear in the UI.
-  allow-commands = ["tail", "grep", "sed", "awk"]
-
-  # A table of commands that the backend can execute. This is best illustrated by
-  # the default configuration listed below.
-  [commands]
-
-  # File, glob and dir filespecs are similar in principle to their
-  # command-line counterparts.
-
-At startup tailon loads the following default configuration:
-
-  title = "Tailon file viewer"
-  relative-root = "/"
-  listen-addr = [":8080"]
-  allow-download = true
-  allow-commands = ["tail", "grep", "sed", "awk"]
-
-  [commands]
-
-    [commands.tail]
-    action = ["tail", "-n", "$lines", "-F", "$path"]
-
-    [commands.grep]
-    stdin = "tail"
-    action = ["grep", "--text", "--line-buffered", "--color=never", "-e", "$script"]
-    default = ".*"
-
-    [commands.sed]
-    stdin = "tail"
-    action = ["sed", "-u", "-e", "$script"]
-    default = "s/.*/&/"
-
-    [commands.awk]
-    stdin = "tail"
-    action = ["awk", "--sandbox", "$script"]
-    default = "{print $0; fflush()}"
-```
-[//]: # (END HELP_CONFIG)
-
 ## Security
 
-Tailon runs commands on the server it is installed on. While commands that
-accept a script argument (such as awk, sed and grep) should be invulnerable
-to shell injection, they may still allow for arbitrary command execution
-and unrestricted access to the filesystem.
+Tailon does not run external commands or invoke a shell. The filter is a Go
+([RE2]) regular expression applied in-process, so there is no risk of shell or
+command injection from anything entered in the UI.
 
-To clarify this point, consider the following script input to the `sed` command:
-
-```
-s/a/b'; cat /etc/secrets
-```
-
-This will result in an error, as tailon does not invoke commands through a
-shell. On the other hand, the following command is a perfectly valid sed script
-that has the same effect as the above attempt for shell injection:
-
-```
-r /etc/secrets
-```
-
-The default set of enabled commands (tail, grep and awk) should be safe to use.
-GNU awk is run in [sandbox] mode, which prevents scripts from accessing your
-system, either through the `system()` builtin or by using input redirection.
-
-By default, tailon is accessible to anyone who knows the server address and
-port.
-
+Tailon serves — and, unless `--allow-download=false` is set, lets clients
+download — exactly the files you point it at on the command line. It performs no
+authentication: by default it is reachable by anyone who can connect to its
+address and port. Restrict the bind address or put it behind an authenticating
+reverse proxy if that matters for your deployment.
 
 ## Development
 
 ### Frontend
 
-To work on the frontend, make sure you're building with the `dev` build tag:
-
-```
-go build -tags dev
-```
-
-This will ensure that the `tailon` binary is reading assets from the
-`frontend/dist` directory instead of from `frontend/assets_vfsdata.go`.
-To compile the web assets, use `make all` in `frontend`.
-
-The `make watch` goal can be used to continuously update the bundles as you
-make changes to the sources.
-
-Note that the frontend bundles are committed in order to make life easier for
-people that only want to work on the backend.
+The frontend is plain, framework-free HTML, CSS and JavaScript. The static
+assets live in `frontend/dist` and the Go templates in `frontend/templates`;
+both are embedded into the binary at compile time with `//go:embed` (see
+`frontend.go`). There is no build step or toolchain — edit the files directly
+and rebuild the binary. The UI talks to the backend over Server-Sent Events.
 
 ### Backend
 
-The backend is written in straightforward go that tries to do as much as
-possible using only the standard library.
-
+The backend is written in straightforward Go using **only the standard library** —
+there are no third-party dependencies. Flag parsing, configuration, HTTP serving,
+access logging, file following and regexp filtering for the Server-Sent Events
+stream are all standard library. File reading and following live in `tailer.go`.
 
 ### TODO
-
-* Directory serving.
-
-* User-specified TOML configuration files.
 
 * Basic and digest authentication.
 
@@ -231,42 +174,29 @@ possible using only the standard library.
 
 * Implement [wtee].
 
-* Stderr is streamed to the client, but it is not handled at the moment.
-
 * Support ANSI color codes.
-
 
 ### Testing
 
-The project has unit-tests, which you can run with `go test` and integration
-tests which you can run with `cd tests; pytest`. Alternatively, you can run both
-with `make test test-int`.
-
-The integration tests are written in Python and use `pytest` and `aiohttp` to
-interact with a running `tailon` instance.
-
-```shell
-make test/.venv  # run once to set up virtualenv and dependencies
-make test-int
-```
-
+Run the unit tests with `go test ./...`.
 
 ## What about the other tailon project?
 
-This project is a full rewrite of the original [tailon] with the following goals in mind:
+This project began as a full rewrite of the original [tailon-legacy] with the
+following goals in mind:
 
 * Reduce maintenance overhead (especially on the frontend).
 * Remove unwanted features and fix poor design choices.
-* Learn more about Go and Vue.js.
 
-In terms of tech, the following has changed:
+In terms of tech, the following changed from the legacy project:
 
 * Backend from Python+Tornado to Go.
-* Frontend from a very-custom Typescript solution to a simple ES5 + Vue.js app.
-* Simplified asset pipeline (a short Makefile).
-* Config file is now toml based.
-* Fully self-contained executable.
-
+* Frontend from a custom TypeScript solution to framework-free vanilla
+  JavaScript (this fork removed the intermediate Vue.js app).
+* No asset pipeline — the static files are embedded directly into the binary.
+* No configuration file and no external tools — file reading, following and
+  regexp filtering are all native Go; settings come from command-line flags.
+* Fully self-contained executable with no third-party dependencies.
 
 ## Similar Projects
 
@@ -274,29 +204,26 @@ In terms of tech, the following has changed:
 * [errorlog]
 * [log.io]
 * [rtail]
-* [tailon]
-
+* [tailon-legacy]
 
 Attributions
 ------------
 
 Tailon's favicon was created from [this icon].
 
-
 ## License
 
 Tailon is released under the terms of the [Apache 2.0 License].
 
-
-
-[clarity]:   https://github.com/tobi/clarity
-[tailon]:    https://github.com/gvalkov/tailon-legacy
-[wtee]:      https://github.com/gvalkov/wtee
-[toml]:      https://github.com/toml-lang/toml
-[releases]:  https://github.com/gvalkov/tailon-next/releases
-[errorlog]:  http://www.psychogenic.com/en/products/Errorlog.php
-[log.io]:    http://logio.org/
-[rtail]:     http://rtail.org/
-[this icon]: http://www.iconfinder.com/icondetails/15150/48/terminal_icon
-[sandbox]:   http://www.gnu.org/software/gawk/manual/html_node/Options.html#index-g_t_0040code_007b_002dS_007d-option-277
+[gvalkov/tailon]: https://github.com/gvalkov/tailon
+[tailon-legacy]:  https://github.com/gvalkov/tailon-legacy
+[syslog-ng]:      https://www.syslog-ng.com/
+[clarity]:        https://github.com/tobi/clarity
+[wtee]:           https://github.com/gvalkov/wtee
+[releases]:       https://github.com/tbocek/tailon/releases
+[errorlog]:       http://www.psychogenic.com/en/products/Errorlog.php
+[log.io]:         http://logio.org/
+[rtail]:          http://rtail.org/
+[this icon]:      http://www.iconfinder.com/icondetails/15150/48/terminal_icon
+[RE2]:            https://github.com/google/re2/wiki/Syntax
 [Apache 2.0 License]: LICENSE

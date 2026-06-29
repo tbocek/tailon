@@ -81,3 +81,17 @@ func TestListingFile(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+func TestListingDir(t *testing.T) {
+	spec, _ := parseFileSpec("testdata/ex1/var/log/")
+	if spec.Type != "dir" {
+		t.Fatalf("expected dir type, got %q", spec.Type)
+	}
+	lst := createListing([]FileSpec{spec})
+	if len(lst["__default__"]) == 0 {
+		t.Fatal("directory listing returned no files")
+	}
+	if !fileAllowed("testdata/ex1/var/log/1.log") {
+		t.Fatal("expected 1.log to be served recursively from the directory")
+	}
+}

@@ -2,11 +2,8 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"github.com/mitchellh/mapstructure"
-	"github.com/pelletier/go-toml"
-	flag "github.com/spf13/pflag"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -15,14 +12,13 @@ import (
 )
 
 const scriptDescription = `
-Usage: tailon -c <config file>
 Usage: tailon [options] <filespec> [<filespec> ...]
 
 Tailon is a webapp for searching through files and streams.
 `
 
 const scriptEpilog = `
-Tailon can be configured via a TOML config file or command-line flags.
+Tailon is configured entirely through command-line flags.
 
 The command-line interface expects one or more <filespec> arguments, which
 specify the files to serve. The format is:
@@ -31,7 +27,7 @@ specify the files to serve. The format is:
 
 The "source" specifier can be a file name, glob or directory. The optional
 "alias=" and "group=" specifiers change the display name of files in the UI
-and the group in which they appear. 
+and the group in which they appear.
 
 A file specifier points to a single, possibly non-existent file. The file
 name can be overwritten with "alias=". For example:
@@ -51,97 +47,16 @@ If a directory is given, all files under it are served recursively.
 Example usage:
   tailon file1.txt file2.txt file3.txt
   tailon alias=messages,/var/log/messages "/var/log/*.log"
-  tailon -b localhost:8080,localhost:8081 -c config.toml
-
-See "--help-config" for configuration file usage.
+  tailon -b localhost:8080,localhost:8081 /var/log/messages
 `
 
-const configFileHelp = `
-The following options can be set through the config file:
+const scriptOptions = `  -a, --allow-download         Allow file downloads (default true)
+  -b, --bind string            Address and port to listen on (default ":8080")
+  -h, --help                   Show this help message and exit
+  -r, --relative-root string   Webapp relative root (default "/")`
 
-  # The <title> element of the of the webapp.
-  title = "Tailon file viewer"
-
-  # The root of the web application.
-  relative-root = "/"
-
-  # The addresses to listen on. Can be an address:port combination or an unix socket.
-  listen-addr = [":8080"]
-
-  # Allow downloading of known files (i.e those matched by a filespec).
-  allow-download = true
-
-  # Commands that will appear in the UI.
-  allow-commands = ["tail", "grep", "sed", "awk"]
-
-  # A table of commands that the backend can execute. This is best illustrated by
-  # the default configuration listed below.
-  [commands]
-
-  # File, glob and dir filespecs are similar in principle to their
-  # command-line counterparts.
-
-At startup tailon loads the following default configuration:
-`
-
-const defaultTomlConfig = `
-  title = "Tailon file viewer"
-  relative-root = "/"
-  listen-addr = [":8080"]
-  allow-download = true
-  allow-commands = ["tail", "grep", "sed", "awk"]
-
-  [commands]
-
-    [commands.tail]
-    action = ["tail", "-n", "$lines", "-F", "$path"]
-
-    [commands.grep]
-    stdin = "tail"
-    action = ["grep", "--text", "--line-buffered", "--color=never", "-e", "$script"]
-    default = ".*"
-
-    [commands.sed]
-    stdin = "tail"
-    action = ["sed", "-u", "-e", "$script"]
-    default = "s/.*/&/"
-
-    [commands.awk]
-    stdin = "tail"
-    action = ["awk", "--sandbox", "$script"]
-    default = "{print $0; fflush()}"
-`
-
-// CommandSpec defines a command that the server can execute.
-type CommandSpec struct {
-	Stdin   string
-	Action  []string
-	Default string
-}
-
-func parseTomlConfig(config string) (*toml.Tree, map[string]CommandSpec) {
-	cfg, err := toml.Load(config)
-	if err != nil {
-		log.Fatal("Error parsing config: ", err)
-	}
-
-	commands := make(map[string]CommandSpec)
-
-	cfgCommands := cfg.Get("commands").(*toml.Tree).ToMap()
-	for key, value := range cfgCommands {
-		command := CommandSpec{}
-		err := mapstructure.Decode(value, &command)
-		if err != nil {
-			log.Fatal(err)
-		}
-		commands[key] = command
-	}
-
-	return cfg, commands
-}
-
-// FileSpec is an instance of a file to be monitored. These are mapped to
-// os.Args or the [files] elements in the config file.
+// FileSpec is an instance of a file to be monitored. These are mapped to the
+// <filespec> command-line arguments.
 type FileSpec struct {
 	Path  string
 	Type  string
@@ -198,89 +113,68 @@ func parseFileSpec(spec string) (FileSpec, error) {
 
 // Config contains all backend and frontend configuration options and relevant state.
 type Config struct {
-	RelativeRoot      string
-	BindAddr          []string
-	ConfigPath        string
-	WrapLinesInitial  bool
-	TailLinesInitial  int
-	AllowCommandNames []string
-	AllowDownload     bool
+	RelativeRoot     string
+	BindAddr         []string
+	WrapLinesInitial bool
+	TailLinesInitial int
+	AllowDownload    bool
 
-	CommandSpecs   map[string]CommandSpec
-	CommandScripts map[string]string
-	FileSpecs      []FileSpec
+	FileSpecs []FileSpec
 }
 
-func makeConfig(configContent string) *Config {
-	defaults, commandSpecs := parseTomlConfig(configContent)
-
-	// Convert the list of bind addresses from []interface{} to []string.
-	addrsA := defaults.Get("listen-addr").([]interface{})
-	addrsB := make([]string, len(addrsA))
-	for i := range addrsA {
-		addrsB[i] = addrsA[i].(string)
+// defaultConfig returns Tailon's built-in configuration. There is no config
+// file; settings come from command-line flags.
+func defaultConfig() *Config {
+	return &Config{
+		RelativeRoot:  "/",
+		BindAddr:      []string{":8080"},
+		AllowDownload: true,
 	}
-
-	config := Config{
-		BindAddr:      addrsB,
-		RelativeRoot:  defaults.Get("relative-root").(string),
-		AllowDownload: defaults.Get("allow-download").(bool),
-		CommandSpecs:  commandSpecs,
-	}
-
-	mapstructure.Decode(defaults.Get("allow-commands"), &config.AllowCommandNames)
-	return &config
 }
 
 var config = &Config{}
 
 func main() {
-	config = makeConfig(defaultTomlConfig)
+	config = defaultConfig()
 
-	printHelp := flag.BoolP("help", "h", false, "Show this help message and exit")
-	printConfigHelp := flag.BoolP("help-config", "e", false, "Show configuration file help and exit")
-	bindAddr := flag.StringP("bind", "b", strings.Join(config.BindAddr, ","), "Address and port to listen on")
+	var (
+		printHelp bool
+		bindAddr  = strings.Join(config.BindAddr, ",")
+	)
 
-	flag.StringVarP(&config.RelativeRoot, "relative-root", "r", config.RelativeRoot, "Webapp relative root")
-	flag.BoolVarP(&config.AllowDownload, "allow-download", "a", config.AllowDownload, "Allow file downloads")
-	flag.StringVarP(&config.ConfigPath, "config", "c", "", "Path to TOML configuration file")
-	flag.Parse()
+	// The standard library flag package accepts both -name and --name. Register
+	// a long and a short name for each option so that e.g. --bind and -b are
+	// equivalent.
+	flag.BoolVar(&printHelp, "help", false, "Show this help message and exit")
+	flag.BoolVar(&printHelp, "h", false, "Show this help message and exit")
+	flag.StringVar(&bindAddr, "bind", bindAddr, "Address and port to listen on")
+	flag.StringVar(&bindAddr, "b", bindAddr, "Address and port to listen on")
+	flag.StringVar(&config.RelativeRoot, "relative-root", config.RelativeRoot, "Webapp relative root")
+	flag.StringVar(&config.RelativeRoot, "r", config.RelativeRoot, "Webapp relative root")
+	flag.BoolVar(&config.AllowDownload, "allow-download", config.AllowDownload, "Allow file downloads")
+	flag.BoolVar(&config.AllowDownload, "a", config.AllowDownload, "Allow file downloads")
 
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, strings.TrimLeft(scriptDescription, "\n"))
-		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, scriptOptions)
 		fmt.Fprintln(os.Stderr, strings.TrimRight(scriptEpilog, "\n"))
-		os.Exit(0)
 	}
 
-	if *printHelp {
+	flag.Parse()
+
+	if printHelp {
 		flag.Usage()
 		os.Exit(0)
 	}
 
-	if *printConfigHelp {
-		fmt.Fprintf(os.Stderr, "%s\n\n%s\n", strings.Trim(configFileHelp, "\n"), strings.Trim(defaultTomlConfig, "\n"))
-		os.Exit(0)
-	}
-
-	config.BindAddr = strings.Split(*bindAddr, ",")
-
-	// If a configuration file is specified, read all options from it. This discards all options set on the command-line.
-	if config.ConfigPath != "" {
-		if b, err := ioutil.ReadFile(config.ConfigPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading config file '%s': %s\n", config.ConfigPath, err)
-			os.Exit(1)
-		} else {
-			config = makeConfig(string(b))
-		}
-	}
+	config.BindAddr = strings.Split(bindAddr, ",")
 
 	// Ensure that relative root is always '/' or '/$arg/'.
 	config.RelativeRoot = "/" + strings.TrimLeft(config.RelativeRoot, "/")
 	config.RelativeRoot = strings.TrimRight(config.RelativeRoot, "/") + "/"
 
 	// Handle command-line file specs.
-	filespecs := make([]FileSpec, len(flag.Args()))
+	filespecs := make([]FileSpec, 0, len(flag.Args()))
 	for _, spec := range flag.Args() {
 		if filespec, err := parseFileSpec(spec); err != nil {
 			fmt.Fprintf(os.Stderr, "Error parsing argument '%s': %s\n", spec, err)
@@ -292,13 +186,8 @@ func main() {
 	config.FileSpecs = filespecs
 
 	if len(config.FileSpecs) == 0 {
-		fmt.Fprintln(os.Stderr, "No files specified on command-line or in config file")
+		fmt.Fprintln(os.Stderr, "No files specified on the command-line")
 		os.Exit(2)
-	}
-
-	config.CommandScripts = make(map[string]string)
-	for cmd, values := range config.CommandSpecs {
-		config.CommandScripts[cmd] = values.Default
 	}
 
 	log.Print("Generate initial file listing")

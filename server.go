@@ -1,34 +1,31 @@
-//go:generate go run frontend_gen.go
-
 package main
 
 import (
 	"encoding/json"
-	"github.com/gorilla/handlers"
-	"github.com/gvalkov/tailon/cmd"
-	"github.com/igm/sockjs-go/v3/sockjs"
-	"github.com/shurcooL/httpfs/html/vfstemplate"
-	"github.com/shurcooL/httpgzip"
+	"fmt"
 	"html/template"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
+	"regexp"
+	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
 func setupRoutes(relativeroot string) *http.ServeMux {
 	router := http.NewServeMux()
 
-	// Use either "frontend_dev.go" or "frontend_bin.go", depending on the "dev" build tag.
-	staticHandler := noCacheControl(httpgzip.FileServer(FrontendAssets, httpgzip.FileServerOptions{IndexHTML: true}))
-
-	sockjsHandler := sockjs.NewHandler(relativeroot+"ws", sockjs.DefaultOptions, wsHandler)
+	// Serve the embedded frontend assets (see frontend.go).
+	staticHandler := noCacheControl(http.FileServerFS(frontendAssets))
 	staticHandler = http.StripPrefix(relativeroot+"vfs/", staticHandler)
 
 	router.Handle(relativeroot+"vfs/", staticHandler)
-	router.Handle(relativeroot+"ws/", sockjsHandler)
+	router.HandleFunc(relativeroot+"list", listHandler)
+	router.HandleFunc(relativeroot+"stream", streamHandler)
 	router.HandleFunc(relativeroot+"files/", downloadHandler)
 	router.HandleFunc(relativeroot+"", indexHandler)
 
@@ -37,23 +34,34 @@ func setupRoutes(relativeroot string) *http.ServeMux {
 
 func setupServer(config *Config, addr string, logger *log.Logger) *http.Server {
 	router := setupRoutes(config.RelativeRoot)
-	loggingRouter := handlers.LoggingHandler(os.Stderr, router)
+	loggingRouter := loggingHandler(os.Stderr, router)
 
 	server := http.Server{
-		Addr:         addr,
-		Handler:      loggingRouter,
-		ErrorLog:     logger,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  15 * time.Second,
+		Addr:        addr,
+		Handler:     loggingRouter,
+		ErrorLog:    logger,
+		ReadTimeout: 5 * time.Second,
+		// No WriteTimeout: the /stream endpoint serves long-lived Server-Sent
+		// Events connections that a write deadline would abruptly cut off.
+		IdleTimeout: 15 * time.Second,
 	}
 
 	return &server
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	t := template.Must(vfstemplate.ParseFiles(FrontendAssets, nil, "/templates/base.html", "/templates/tailon.html"))
+	t := template.Must(template.ParseFS(frontendAssets, "templates/base.html", "templates/tailon.html"))
 	t.Execute(w, config)
+}
+
+// listHandler returns the current file listing as JSON. The frontend fetches it
+// to populate the file selector. This replaces the SockJS "list" message.
+func listHandler(w http.ResponseWriter, r *http.Request) {
+	listing := createListing(config.FileSpecs)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(listing); err != nil {
+		log.Println("error: ", err)
+	}
 }
 
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +70,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := r.URL.Query()["path"][0]
+	path := r.URL.Query().Get("path")
 	if !fileAllowed(path) {
 		log.Printf("warn: attempt to access unknown file: %s", path)
 		http.Error(w, "unknown file", http.StatusNotFound)
@@ -80,145 +88,261 @@ func noCacheControl(h http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-// FrontendCommand instances are the messages that the client sends to the server when the file, tool or script change.
-type FrontendCommand struct {
-	Command string
-	Script  string
-	Entry   ListEntry
-	Nlines  int
+// responseRecorder wraps an http.ResponseWriter to capture the status code and
+// number of bytes written, for access logging. It implements Unwrap so that
+// http.ResponseController (used by streamHandler to flush) can reach the
+// underlying ResponseWriter.
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
 }
 
-// The main sockjs handler.
-func wsHandler(session sockjs.Session) {
-	messages := make(chan string)
-	done := make(chan struct{})
-	defer close(done)
+func (r *responseRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
 
-	go wsWriter(session, messages, done)
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += n
+	return n, err
+}
 
-	for {
-		if msg, err := session.Recv(); err == nil {
-			messages <- msg
-			continue
-		} else {
-			log.Print(err)
+func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// loggingHandler logs each request in Apache Common Log Format. It replaces
+// github.com/gorilla/handlers; streaming keeps working because the SSE handler
+// flushes through http.ResponseController, which unwraps to the real writer.
+func loggingHandler(out io.Writer, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
 		}
-		break
-	}
+		fmt.Fprintf(out, "%s - - [%s] %q %d %d\n",
+			host, start.Format("02/Jan/2006:15:04:05 -0700"),
+			r.Method+" "+r.RequestURI+" "+r.Proto, rec.status, rec.bytes)
+	})
 }
 
-// Goroutine handling received messages and streaming of file contents.
-func wsWriter(session sockjs.Session, messages chan string, done <-chan struct{}) {
-	// The processes that make up the pipeline. The stdout of procA is connected to the stdin of procB.
-	var procA *exec.Cmd
-	var procB *cmd.Cmd
+const (
+	// mergeInterval is how often all-files mode flushes its buffer of lines,
+	// sorted by timestamp, so several files are interleaved chronologically.
+	mergeInterval = 200 * time.Millisecond
+	// detectSample is how many of a file's first lines are sampled to detect its
+	// timestamp format before that format is locked in.
+	detectSample = 10
+)
 
-	cmdOptions := cmd.Options{Buffered: false, Streaming: true}
+// logLine is one line of output tagged with the file it came from (used to
+// prefix lines when several files are streamed at once).
+type logLine struct {
+	path string
+	text string
+}
 
-	for {
-		select {
-		case msg := <-messages:
-			if msg == "list" {
-				lst := createListing(config.FileSpecs)
-				b, err := json.Marshal(lst)
-				if err != nil {
-					log.Println("error: ", err)
-				}
-				session.Send(string(b))
-			} else if msg[0] == '{' {
-				msgJSON := FrontendCommand{}
-				json.Unmarshal([]byte(msg), &msgJSON)
+// streamHandler streams a file (or every served file, with all=1) to the client
+// over Server-Sent Events. Query parameters:
+//
+//	mode    "tail" (default) follows the file like tail -f; "grep" reads the
+//	        whole file once, from the start, without following.
+//	filter  optional regular expression; only matching lines are sent.
+//	invert  "1" inverts the filter, sending only non-matching lines.
+//	nlines  in tail mode, how many trailing lines to show before following.
+//	path    the file to stream, or all=1 for every served file.
+//
+// Each line is sent as an SSE "data:" frame holding a JSON ["o", line] pair.
+// Reading, following and filtering are all done in Go — no external tail/grep.
+func streamHandler(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	query := r.URL.Query()
 
-				if !fileAllowed(msgJSON.Entry.Path) {
-					log.Print("Unknown file: ", msgJSON.Entry.Path)
-					continue
-				}
+	follow := query.Get("mode") != "grep" // "tail" follows; "grep" reads once
+	nlines, _ := strconv.Atoi(query.Get("nlines"))
+	invert := query.Get("invert") == "1"
 
-				killProcs(procA, procB)
-
-				// Check if the command is using another command for stdin.
-				stdinSource := config.CommandSpecs[msgJSON.Command].Stdin
-				if stdinSource != "" {
-					actionA := config.CommandSpecs[stdinSource].Action
-					actionA = expandCommandArgs(actionA, msgJSON)
-					procA = exec.Command(actionA[0], actionA[1:]...)
-					log.Print("Running command: ", actionA)
-				}
-
-				actionB := config.CommandSpecs[msgJSON.Command].Action
-				actionB = expandCommandArgs(actionB, msgJSON)
-				procB = cmd.NewCmdOptions(cmdOptions, actionB[0], actionB[1:]...)
-				log.Print("Running command: ", actionB)
-
-				// Start streaming procB's stdout and stderr to the client.
-				go streamOutput(procA, procB, session)
-			}
-		case <-done:
-			killProcs(procA, procB)
+	var filter *regexp.Regexp
+	if expr := query.Get("filter"); expr != "" {
+		re, err := regexp.Compile(expr)
+		if err != nil {
+			http.Error(w, "invalid filter: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		filter = re
 	}
-}
 
-// Expands the variables in main.CommandSpec.Action with the values in the
-// frontend command. For example:
-//
-//	["tail", "-n", "$lines", "-F", "$path"] -> ["tail", "-n", "10", "-F", "f1.txt"]
-func expandCommandArgs(action []string, cmd FrontendCommand) []string {
-	var res = make([]string, 0)
+	// Resolve the files to stream. "all=1" streams every served file at once.
+	var paths []string
+	if query.Get("all") == "1" {
+		paths = allowedFiles()
+		if len(paths) == 0 {
+			http.Error(w, "no files to stream", http.StatusNotFound)
+			return
+		}
+	} else {
+		path := query.Get("path")
+		if !fileAllowed(path) {
+			log.Print("Unknown file: ", path)
+			http.Error(w, "unknown file", http.StatusNotFound)
+			return
+		}
+		paths = []string{path}
+	}
 
-	for _, arg := range action {
-		switch arg {
-		case "$lines":
-			res = append(res, strconv.Itoa(cmd.Nlines))
-		case "$path":
-			res = append(res, cmd.Entry.Path)
-		case "$script":
-			res = append(res, cmd.Script)
-		default:
-			res = append(res, arg)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	ctx := r.Context()
+	multi := len(paths) > 1
+
+	// Stream every file concurrently into a shared channel.
+	lines := make(chan logLine, 256)
+	var wg sync.WaitGroup
+	for _, p := range paths {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			streamFile(ctx, p, follow, nlines, func(text string) {
+				select {
+				case lines <- logLine{p, text}:
+				case <-ctx.Done():
+				}
+			})
+		}(p)
+	}
+	go func() { wg.Wait(); close(lines) }()
+
+	matches := func(text string) bool {
+		return filter == nil || filter.MatchString(text) != invert
+	}
+	writeLine := func(ln logLine) bool {
+		text := ln.text
+		if multi {
+			text = ln.path + ": " + text
+		}
+		data, _ := json.Marshal(text)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return false
+		}
+		rc.Flush()
+		return true
+	}
+	writeEOF := func() {
+		// Tell the client we're done so its EventSource closes instead of
+		// reconnecting (only happens in grep mode, when every file is read).
+		fmt.Fprint(w, "event: eof\ndata: \n\n")
+		rc.Flush()
+	}
+
+	// A single file is already in order, so stream its lines as they arrive.
+	if !multi {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ln, ok := <-lines:
+				if !ok {
+					writeEOF()
+					return
+				}
+				if matches(ln.text) && !writeLine(ln) {
+					return
+				}
+			}
 		}
 	}
 
-	return res
-}
+	// Several files: merge them in timestamp order. Lines are buffered and
+	// flushed sorted every mergeInterval, which also orders the initial burst.
+	// A line with no recognizable timestamp inherits its file's last one, so
+	// multi-line entries stay together; failing that it sorts as "now".
+	type timedLine struct {
+		logLine
+		ts time.Time
+	}
+	var buf []timedLine
+	ticker := time.NewTicker(mergeInterval)
+	defer ticker.Stop()
 
-// Goroutine that streams command stdout and stderr to the client.
-func streamOutput(procA *exec.Cmd, procB *cmd.Cmd, session sockjs.Session) {
-	if procA != nil {
-		procB.Stdin, _ = procA.StdoutPipe()
-		procA.Start()
+	flush := func() bool {
+		sort.SliceStable(buf, func(i, j int) bool { return buf[i].ts.Before(buf[j].ts) })
+		for _, ln := range buf {
+			if !writeLine(ln.logLine) {
+				return false
+			}
+		}
+		buf = buf[:0]
+		return true
 	}
 
-	statusChan := procB.Start()
+	// Per-file timestamp detection: the layout is chosen from the file's first
+	// detectSample lines (checked across several lines, not guessed from one),
+	// then reused. A line with no timestamp inherits the file's previous one.
+	type detector struct {
+		layout string
+		sample []string
+		lastTS time.Time
+	}
+	detectors := make(map[string]*detector)
+	timestamp := func(ln logLine) time.Time {
+		d := detectors[ln.path]
+		if d == nil {
+			d = &detector{}
+			detectors[ln.path] = d
+		}
+		var ts time.Time
+		var ok bool
+		switch d.layout {
+		case "none": // no usable timestamp format in this file
+		case "": // still sampling to detect the format
+			ts, ok = matchAny(ln.text)
+			if d.sample = append(d.sample, ln.text); len(d.sample) >= detectSample {
+				if d.layout = detectLayout(d.sample); d.layout == "" {
+					d.layout = "none"
+				}
+				d.sample = nil
+			}
+		default:
+			ts, ok = matchLayout(d.layout, ln.text)
+		}
+		switch {
+		case ok:
+			d.lastTS = ts
+			return ts
+		case !d.lastTS.IsZero():
+			return d.lastTS // continuation line: keep with the previous entry
+		default:
+			return time.Now()
+		}
+	}
 
 	for {
 		select {
-		case line := <-procB.Stdout:
-			msg := []string{"o", line}
-			data, _ := json.Marshal(msg)
-			session.Send(string(data))
-		case line := <-procB.Stderr:
-			msg := []string{"e", line}
-			data, _ := json.Marshal(msg)
-			session.Send(string(data))
-		case <-statusChan:
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !flush() {
+				return
+			}
+		case ln, ok := <-lines:
+			if !ok {
+				flush()
+				writeEOF()
+				return
+			}
+			if !matches(ln.text) {
+				continue
+			}
+			buf = append(buf, timedLine{ln, timestamp(ln)})
 		}
-	}
-}
-
-func killProcs(procA *exec.Cmd, procB *cmd.Cmd) {
-	if procA != nil {
-		log.Printf("Stopping pid %d", procA.Process.Pid)
-		procA.Process.Kill()
-		procA.Wait()
-	}
-
-	if procB != nil {
-		log.Printf("Stopping pid %d", procB.Status().PID)
-		if procB.Stdin != nil {
-			procB.Stdin.Close()
-		}
-		procB.Stop()
 	}
 }

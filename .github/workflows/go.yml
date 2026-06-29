@@ -1,5 +1,5 @@
 name: Go
-
+.e
 on:
   push:
     branches: [ "main" ]
@@ -18,18 +18,7 @@ jobs:
         go-version: stable
 
     - name: Build
-      run: |
-        go generate -v .
-        go build -v .
+      run: go build -v .
 
     - name: Test
       run: go test -v .
-
-    - name: Run GoReleaser
-      uses: goreleaser/goreleaser-action@v6
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        version: '~> v2'
-        args: release --clean
-      env:
-        GITHUB_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
