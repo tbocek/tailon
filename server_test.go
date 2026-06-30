@@ -24,22 +24,15 @@ func TestDefaultConfig(t *testing.T) {
 	if c.RelativeRoot != "/" {
 		t.Errorf("RelativeRoot = %q", c.RelativeRoot)
 	}
-	if !c.AllowDownload {
-		t.Error("AllowDownload should default to true")
-	}
 }
 
-// setupConfig points the global config at a filespec and builds the
+// setupConfig points the global config at a single source and builds the
 // allowed-file listing, the way main() does at startup.
-func setupConfig(t *testing.T, spec string) {
+func setupConfig(t *testing.T, source string) {
 	t.Helper()
 	config = defaultConfig()
-	fs, err := parseFileSpec(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.FileSpecs = []FileSpec{fs}
-	createListing(config.FileSpecs)
+	config.Sources = []string{source}
+	createListing(config.Sources)
 }
 
 func TestListHandler(t *testing.T) {
@@ -51,12 +44,11 @@ func TestListHandler(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	var listing map[string][]*ListEntry
+	var listing []*ListEntry
 	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	entries := listing["__default__"]
-	if len(entries) != 1 || entries[0].Path != "testdata/ex1/var/log/1.log" {
+	if len(listing) != 1 || listing[0].Path != "testdata/ex1/var/log/1.log" {
 		t.Fatalf("unexpected listing: %#v", listing)
 	}
 }
@@ -65,11 +57,11 @@ func TestListHandler(t *testing.T) {
 // against the concurrent readers fileAllowed/allowedFiles, as happens when a
 // /list request overlaps a /stream or /files request. It must pass under -race.
 func TestListingNoRace(t *testing.T) {
-	setupConfig(t, "testdata/ex1/var/log/*.log")
+	setupConfig(t, "testdata/ex1/var/log/")
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); createListing(config.FileSpecs) }()
+		go func() { defer wg.Done(); createListing(config.Sources) }()
 		go func() {
 			defer wg.Done()
 			_ = allowedFiles()
@@ -181,9 +173,8 @@ func TestStreamFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	config = defaultConfig()
-	fs, _ := parseFileSpec(path)
-	config.FileSpecs = []FileSpec{fs}
-	createListing(config.FileSpecs)
+	config.Sources = []string{path}
+	createListing(config.Sources)
 
 	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
 	defer srv.Close()
@@ -235,7 +226,7 @@ func TestStreamFollow(t *testing.T) {
 
 // TestStreamAllFiles checks the all=1 mode streams every file, prefixed by path.
 func TestStreamAllFiles(t *testing.T) {
-	setupConfig(t, "testdata/ex1/var/log/*.log")
+	setupConfig(t, "testdata/ex1/var/log/")
 	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
 	defer srv.Close()
 
@@ -272,10 +263,8 @@ func TestStreamAllFilesSorted(t *testing.T) {
 	}
 
 	config = defaultConfig()
-	sa, _ := parseFileSpec(a)
-	sb, _ := parseFileSpec(b)
-	config.FileSpecs = []FileSpec{sa, sb}
-	createListing(config.FileSpecs)
+	config.Sources = []string{a, b}
+	createListing(config.Sources)
 
 	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
 	defer srv.Close()
@@ -297,6 +286,43 @@ func TestStreamAllFilesSorted(t *testing.T) {
 	}
 	if want := []string{"a1", "b2", "a3", "b4"}; !reflect.DeepEqual(markers, want) {
 		t.Fatalf("merge order: got %v, want %v (frames %v)", markers, want, got)
+	}
+}
+
+// TestStreamScopedSubfolder checks all=1&scope=<dir> streams only the files
+// under that subfolder, never a sibling's.
+func TestStreamScopedSubfolder(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"host1", "host2"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(dir, "host1", "a.log"), []byte("aaa\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "host1", "c.log"), []byte("ccc\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "host2", "b.log"), []byte("bbb\n"), 0o644)
+
+	config = defaultConfig()
+	config.Sources = []string{dir}
+	createListing(config.Sources)
+
+	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
+	defer srv.Close()
+
+	scope := filepath.Join(dir, "host1")
+	resp, err := http.Get(srv.URL + "?mode=grep&all=1&scope=" + url.QueryEscape(scope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Two files under host1, so lines are path-prefixed; none may be from host2.
+	got := readSSEData(t, resp.Body, 2, 5*time.Second)
+	for _, frame := range got {
+		var s string
+		if json.Unmarshal([]byte(frame), &s); !strings.Contains(s, "host1") || strings.Contains(s, "host2") {
+			t.Fatalf("scope leaked outside host1: %q", s)
+		}
 	}
 }
 
@@ -364,11 +390,21 @@ func TestIndexHandler(t *testing.T) {
 func TestDownloadHandler(t *testing.T) {
 	setupConfig(t, "testdata/ex1/var/log/1.log")
 
-	// Allowed file.
+	// Allowed file: served, but as a no-sniff plain-text attachment so a log that
+	// looks like HTML cannot execute as script in this origin.
 	w := httptest.NewRecorder()
 	downloadHandler(w, httptest.NewRequest("GET", "/files/?path=testdata/ex1/var/log/1.log", nil))
 	if w.Code != http.StatusOK {
 		t.Errorf("allowed download: status = %d", w.Code)
+	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("download X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Content-Disposition"); got != "attachment" {
+		t.Errorf("download Content-Disposition = %q, want attachment", got)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("download Content-Type = %q, want text/plain", ct)
 	}
 
 	// Missing path must not panic; it is simply unknown.
@@ -383,13 +419,5 @@ func TestDownloadHandler(t *testing.T) {
 	downloadHandler(w, httptest.NewRequest("GET", "/files/?path=/etc/passwd", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("disallowed file: status = %d", w.Code)
-	}
-
-	// Downloads disabled entirely.
-	config.AllowDownload = false
-	w = httptest.NewRecorder()
-	downloadHandler(w, httptest.NewRequest("GET", "/files/?path=testdata/ex1/var/log/1.log", nil))
-	if w.Code != http.StatusForbidden {
-		t.Errorf("downloads disabled: status = %d", w.Code)
 	}
 }

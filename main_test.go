@@ -1,97 +1,81 @@
 package main
 
 import (
-	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-func TestCliFileSpec(t *testing.T) {
-	a, b := "/a/b/c", FileSpec{"/a/b/c", "file", "", ""}
-	if res, err := parseFileSpec(a); err != nil || res != b {
-		t.Fatalf("%s != %s", b, res)
-	}
-
-	a, b = "alias=1,/a/b/c", FileSpec{"/a/b/c", "file", "1", ""}
-	if res, err := parseFileSpec(a); err != nil || res != b {
-		t.Fatalf("%s != %s", b, res)
-	}
-
-	a, b = "alias=2,/var/log/*.log", FileSpec{"/var/log/*.log", "glob", "2", ""}
-	if res, err := parseFileSpec(a); err != nil || res != b {
-		t.Fatalf("%s != %s", b, res)
-	}
-
-	a, b = "alias=1,group=\"a b\",/var/log/", FileSpec{"/var/log/", "dir", "1", "a b"}
-	if res, err := parseFileSpec(a); err != nil || res != b {
-		t.Fatalf("%s != %s", b, res)
+func TestGatherSources(t *testing.T) {
+	got := gatherSources([]string{"/a/b/c", "/d,/e", "  /f , /g  ", ""})
+	want := []string{"/a/b/c", "/d", "/e", "/f", "/g"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gatherSources = %q, want %q", got, want)
 	}
 }
 
-func getAliases(entries []*ListEntry) []string {
-	aliases := make([]string, len(entries))
-	for n, entry := range entries {
-		aliases[n] = entry.Alias
+func paths(entries []*ListEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Path
 	}
-	return aliases
+	return out
 }
 
-func TestListingWildcard(t *testing.T) {
-	spec, _ := parseFileSpec("testdata/ex1/var/log/*.log")
-	lst := createListing([]FileSpec{spec})
-
-	if len(lst["__default__"]) != 4 {
-		t.Fatalf("len(%#v) != 4\n", lst)
+func TestListingFiles(t *testing.T) {
+	lst := createListing([]string{"testdata/ex1/var/log/2.log", "testdata/ex1/var/log/1.log"})
+	// Listing is path-sorted, so 1.log comes before 2.log regardless of order.
+	want := []string{"testdata/ex1/var/log/1.log", "testdata/ex1/var/log/2.log"}
+	if got := paths(lst); !reflect.DeepEqual(got, want) {
+		t.Fatalf("paths = %q, want %q", got, want)
 	}
-
-	aliases := getAliases(lst["__default__"])
-	if fmt.Sprintf("%q", aliases) != `["" "" "" ""]` {
-		t.Fatal()
-	}
-
-	spec, _ = parseFileSpec("alias=logs,testdata/ex1/var/log/*.log")
-	lst = createListing([]FileSpec{spec})
-
-	aliases = getAliases(lst["__default__"])
-	expect := `["logs/1.log" "logs/2.log" "logs/3.log" "logs/4.log"]`
-	if fmt.Sprintf("%q", aliases) != expect {
-		t.Fatalf("%q != %q", aliases, expect)
-	}
-
-}
-
-func TestListingFile(t *testing.T) {
-	spec1, _ := parseFileSpec("testdata/ex1/var/log/1.log")
-	spec2, _ := parseFileSpec("testdata/ex1/var/log/2.log")
-	lst := createListing([]FileSpec{spec1, spec2})
-
-	aliases := getAliases(lst["__default__"])
-	repr := fmt.Sprintf("%#q", aliases)
-	if repr != "[`testdata/ex1/var/log/1.log` `testdata/ex1/var/log/2.log`]" {
-		t.Fatal()
-	}
-
-	spec1, _ = parseFileSpec("group=a,alias=a.log,testdata/ex1/var/log/1.log")
-	spec2, _ = parseFileSpec("group=b,alias=b.log,testdata/ex1/var/log/2.log")
-
-	lst = createListing([]FileSpec{spec1, spec2})
-	if lst["a"][0].Alias != "a.log" || !lst["a"][0].Exists {
-		t.Fatal()
-	}
-	if lst["b"][0].Alias != "b.log" || !lst["b"][0].Exists {
-		t.Fatal()
+	if !lst[0].Exists {
+		t.Fatal("expected 1.log to be marked as existing")
 	}
 }
 
 func TestListingDir(t *testing.T) {
-	spec, _ := parseFileSpec("testdata/ex1/var/log/")
-	if spec.Type != "dir" {
-		t.Fatalf("expected dir type, got %q", spec.Type)
-	}
-	lst := createListing([]FileSpec{spec})
-	if len(lst["__default__"]) == 0 {
-		t.Fatal("directory listing returned no files")
+	lst := createListing([]string{"testdata/ex1/var/log/"})
+	if len(lst) != 4 {
+		t.Fatalf("expected 4 files served recursively, got %d: %q", len(lst), paths(lst))
 	}
 	if !fileAllowed("testdata/ex1/var/log/1.log") {
-		t.Fatal("expected 1.log to be served recursively from the directory")
+		t.Fatal("expected 1.log to be allowed after the directory walk")
+	}
+}
+
+func TestListingGlob(t *testing.T) {
+	lst := createListing([]string{"testdata/ex1/var/log/*.log"})
+	if len(lst) != 4 {
+		t.Fatalf("glob expanded to %d files, want 4: %q", len(lst), paths(lst))
+	}
+}
+
+func TestListingDoubleStar(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{"a.log", "sub/b.log", "sub/deep/c.log", "sub/note.txt"} {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		pattern string
+		want    int
+	}{
+		{"**.log", 3},   // every .log at any depth
+		{"**/*.log", 3}, // same set: "**/" may span zero directories
+		{"*.log", 1},    // single level only (single-level glob, not "**")
+		{"sub/**.log", 2},
+	}
+	for _, c := range cases {
+		got := len(createListing([]string{filepath.Join(dir, c.pattern)}))
+		if got != c.want {
+			t.Errorf("%q matched %d files, want %d", c.pattern, got, c.want)
+		}
 	}
 }

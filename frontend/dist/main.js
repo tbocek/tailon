@@ -3,7 +3,7 @@
 // Tailon frontend: framework-free vanilla JavaScript. It fetches the file list
 // and streams lines over Server-Sent Events. Modes: "tail" (follow) and "grep"
 // (whole file); a regexp filter (server-side, invertible) narrows the output.
-// Injected globals: relativeRoot, allowDownload.
+// Injected global: relativeRoot.
 
 const RELATIVE_ROOT = (typeof relativeRoot !== "undefined" && relativeRoot) || "/";
 const MODES = ["tail", "grep"];
@@ -131,7 +131,12 @@ function connect() {
 
     const p = new URLSearchParams({ mode: state.mode, filter: state.filter, nlines: String(TAIL_LINES) });
     if (state.invert) p.set("invert", "1");
-    if (state.file.all) p.set("all", "1"); else p.set("path", state.file.path);
+    if (state.file.all) {
+        p.set("all", "1");
+        if (state.file.scope) p.set("scope", state.file.scope); // one subfolder only
+    } else {
+        p.set("path", state.file.path);
+    }
 
     setStatus("connecting…");
     const src = new EventSource(RELATIVE_ROOT + "stream?" + p.toString());
@@ -147,32 +152,44 @@ async function refreshFiles() {
     try { data = await (await fetch(RELATIVE_ROOT + "list")).json(); }
     catch (e) { setStatus("could not load file list"); return; }
 
-    const prev = state.file && state.file.path;
+    const prev = state.file && (state.file.scope || state.file.path);
     state.files = [];
     el["file-select"].replaceChildren();
 
     el["file-select"].add(new Option("All files", "0"));
-    state.files.push({ path: "", alias: "All files", all: true });
+    state.files.push({ path: "", all: true });
 
-    Object.keys(data).forEach(function (key) {
-        const group = document.createElement("optgroup");
-        group.label = key === "__default__" ? "Ungrouped Files" : key;
-        data[key].forEach(function (entry) {
-            group.appendChild(new Option(entry.alias || entry.path, String(state.files.length)));
-            state.files.push(entry);
+    // Offer each subfolder as a "tail/grep everything under here" entry. A folder
+    // is any ancestor directory holding some — but not all — of the files; one
+    // holding all of them would just duplicate "All files", so it is skipped.
+    const counts = {};
+    data.forEach(function (entry) {
+        let d = entry.path;
+        for (let i = d.lastIndexOf("/"); i > 0; i = d.lastIndexOf("/")) {
+            d = d.slice(0, i);
+            counts[d] = (counts[d] || 0) + 1;
+        }
+    });
+    Object.keys(counts).filter(function (d) { return counts[d] < data.length; }).sort()
+        .forEach(function (d) {
+            el["file-select"].add(new Option("▸ " + d + "/", String(state.files.length)));
+            state.files.push({ path: d, scope: d, all: true });
         });
-        el["file-select"].appendChild(group);
+
+    data.forEach(function (entry) {
+        el["file-select"].add(new Option(entry.path, String(state.files.length)));
+        state.files.push(entry);
     });
 
-    // Restore the previous selection by path, else select the first entry.
-    let i = state.files.findIndex(function (f) { return f.path === prev; });
+    // Restore the previous selection by path/scope, else select the first entry.
+    let i = state.files.findIndex(function (f) { return (f.scope || f.path) === prev; });
     if (i < 0) i = state.files.length ? 0 : -1;
     state.file = i >= 0 ? state.files[i] : null;
     if (i >= 0) el["file-select"].value = String(i);
 }
 
 function updateDownload() {
-    const off = !allowDownload || !state.file || state.file.all;
+    const off = !state.file || state.file.all;
     el["action-download"].hidden = off;
     if (!off) {
         el["action-download"].href = RELATIVE_ROOT + "files/?path=" + encodeURIComponent(state.file.path);

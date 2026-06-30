@@ -7,14 +7,11 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/tbocek/tailon)](https://goreportcard.com/report/github.com/tbocek/tailon)
 [![Apache License](https://img.shields.io/badge/license-Apache-blue.svg)](https://github.com/tbocek/tailon/blob/main/LICENSE)
 
-> **This is a fork of [gvalkov/tailon].** It modernizes the project and strips it
-> down to **zero third-party dependencies**: the frontend assets are embedded with
-> Go's `embed` package (no code generation), the web UI was rewritten as
-> framework-free vanilla HTML/CSS/JavaScript that streams over **Server-Sent
-> Events** (replacing the Vue.js + SockJS frontend), the config file was dropped
-> in favor of command-line flags, the Python integration tests were removed, and
-> releases are produced by a small [`release.sh`](release.sh) plus GitHub Actions
-> instead of GoReleaser.
+> **This is a fork of [gvalkov/tailon].** It keeps the purpose — tail and grep your
+> log files from the browser — but rebuilds the project around the Go standard
+> library alone: **zero third-party dependencies**, no JavaScript toolchain, and a
+> single static binary. [How this fork differs from the original](#how-this-fork-differs-from-the-original)
+> spells out exactly what changed and why you might pick it over upstream.
 
 Tailon is a webapp for looking at and searching through log files from your
 browser. It serves files — single files, globs or whole directories — and lets
@@ -23,6 +20,27 @@ filter (which can be inverted). Reading, following and filtering are all done
 natively in Go: tailon never shells out to `tail`, `grep` or any other tool, and
 it has **no dependencies** — just the Go standard library, shipped as a single
 static binary.
+
+## How this fork differs from the original
+
+The "original" here is **[gvalkov/tailon]**, the Go project this repository was
+forked from — *not* the older Python [tailon-legacy] (see [Project
+lineage](#project-lineage)). Same job, far less machinery:
+
+| Area | [gvalkov/tailon] (upstream) | This fork |
+| --- | --- | --- |
+| Third-party dependencies | Vue.js, SockJS, build-time tooling | **None** — Go standard library only |
+| Frontend | Vue.js single-page app | Framework-free vanilla HTML/CSS/JS |
+| Live updates | SockJS | Server-Sent Events |
+| Frontend assets | produced by a code-generation/build step | embedded with `//go:embed`, no build step |
+| Configuration | configuration file | command-line flags only |
+| Releases | GoReleaser | a small [`release.sh`](release.sh) + GitHub Actions |
+| Tests | Python integration tests | Go unit tests (`go test ./...`) |
+
+The result is a smaller, self-contained binary you can read and audit in one
+sitting — no Node/npm, no asset pipeline, nothing to vendor. Prefer the original's
+Vue UI and configuration-file setup? Use [gvalkov/tailon]. Want a tiny,
+dependency-free log tailer? Use this.
 
 ## Install
 
@@ -49,13 +67,21 @@ Each file can be viewed in two modes — **tail** (follow the file live, like
 an optional regular-expression **filter** that can be inverted (both set in the
 UI). Tailon itself is configured entirely with command-line flags.
 
-To get started, run tailon with the list of files that you wish to monitor.
+To get started, run tailon with the files or directories you want to monitor.
+Each argument is a file, a directory, or a shell glob — `*` matches within a
+directory and `**` across them — and a single argument can list several,
+comma-separated:
 
 ```
 tailon /var/log/apache/access.log /var/log/apache/error.log /var/log/messages
+tailon /var/log/apache/,/var/log/nginx/
+tailon "/var/log/**.log"
 ```
 
-Tailon can serve single files, globs or whole directory trees.
+Directories are served recursively — every file beneath them (including in
+subdirectories) is available, and new files are picked up as they appear. The
+file selector also lists each subfolder, so you can tail or grep just the logs
+beneath one of them.
 
 The web UI's file selector includes an **All files** entry (selected by default)
 that streams every served file at once, each line prefixed by its file and the
@@ -77,11 +103,8 @@ tailon at the directory to serve everything under it recursively:
 tailon /var/log/remote/
 ```
 
-Or use a glob with `group=`/`alias=` to organize the file picker by host:
-
-```
-tailon "group=hosts,/var/log/remote/*/*.log"
-```
+Every file beneath it — including per-host subdirectories — shows up in the file
+picker, and **All files** streams them all merged in timestamp order.
 
 Tailon's server-side functionality is summarized entirely in its help message:
 
@@ -89,45 +112,27 @@ Tailon's server-side functionality is summarized entirely in its help message:
 
 [//]: # (BEGIN HELP_USAGE)
 ```
-Usage: tailon [options] <filespec> [<filespec> ...]
+Usage: tailon [options] <path> [<path> ...]
 
-Tailon is a webapp for searching through files and streams.
+Tailon is a webapp for searching through log files from your browser.
 
-  -a, --allow-download         Allow file downloads (default true)
   -b, --bind string            Address and port to listen on (default ":8080")
   -h, --help                   Show this help message and exit
   -r, --relative-root string   Webapp relative root (default "/")
 
 Tailon is configured entirely through command-line flags.
 
-The command-line interface expects one or more <filespec> arguments, which
-specify the files to serve. The format is:
-
-  [alias=name,group=name]<source>
-
-The "source" specifier can be a file name, glob or directory. The optional
-"alias=" and "group=" specifiers change the display name of files in the UI
-and the group in which they appear.
-
-A file specifier points to a single, possibly non-existent file. The file
-name can be overwritten with "alias=". For example:
-
-  tailon alias=error.log,/var/log/apache/error.log
-
-A glob evaluates to the list of files that match a shell filename pattern.
-The pattern is evaluated each time the file list is refreshed. An "alias="
-specifier overwrites the parent directory of each matched file in the UI.
-
-  tailon "/var/log/apache/*.log" "alias=nginx,/var/log/nginx/*.log"
-
-If a directory is given, all files under it are served recursively.
-
-  tailon /var/log/apache/ /var/log/nginx/
+Each <path> is a file, a directory, or a shell glob, where "*" matches within a
+directory and "**" across them (so "/var/log/**.log" finds .log files at any
+depth). Directories are served recursively, and new files are picked up as they
+appear. Several paths can be given as separate arguments or comma-separated.
 
 Example usage:
-  tailon file1.txt file2.txt file3.txt
-  tailon alias=messages,/var/log/messages "/var/log/*.log"
-  tailon -b localhost:8080,localhost:8081 /var/log/messages
+  tailon /var/log/syslog /var/log/auth.log
+  tailon /var/log/nginx/,/var/log/apache/
+  tailon /var/log/remote/
+  tailon "/var/log/**.log"
+  tailon -b 127.0.0.1:8080 /var/log/messages
 ```
 [//]: # (END HELP_USAGE)
 
@@ -137,8 +142,8 @@ Tailon does not run external commands or invoke a shell. The filter is a Go
 ([RE2]) regular expression applied in-process, so there is no risk of shell or
 command injection from anything entered in the UI.
 
-Tailon serves — and, unless `--allow-download=false` is set, lets clients
-download — exactly the files you point it at on the command line. It performs no
+Tailon serves — and lets clients download — exactly the files you point it at on
+the command line. It performs no
 authentication: by default it is reachable by anyone who can connect to its
 address and port. Restrict the bind address or put it behind an authenticating
 reverse proxy if that matters for your deployment.
@@ -182,23 +187,20 @@ stream are all standard library. File reading and following live in `tailer.go`.
 
 Run the unit tests with `go test ./...`.
 
-## What about the other tailon project?
+## Project lineage
 
-This project began as a full rewrite of the original [tailon-legacy] with the
-following goals in mind:
+Three distinct projects have carried the **tailon** name; this is the third, and
+the source of the recurring "wait, which tailon?" confusion:
 
-* Reduce maintenance overhead (especially on the frontend).
-* Remove unwanted features and fix poor design choices.
-
-In terms of tech, the following changed from the legacy project:
-
-* Backend from Python+Tornado to Go.
-* Frontend from a custom TypeScript solution to framework-free vanilla
-  JavaScript (this fork removed the intermediate Vue.js app).
-* No asset pipeline — the static files are embedded directly into the binary.
-* No configuration file and no external tools — file reading, following and
-  regexp filtering are all native Go; settings come from command-line flags.
-* Fully self-contained executable with no third-party dependencies.
+1. **[tailon-legacy]** — the first one, written in Python + Tornado with a custom
+   TypeScript frontend.
+2. **[gvalkov/tailon]** — a full rewrite in Go with a Vue.js + SockJS frontend,
+   configured through a file and released with GoReleaser. **This is the upstream
+   this repository is forked from.**
+3. **This fork** — drops the third-party frontend and tooling for a
+   framework-free, dependency-free, single static binary. See [How this fork
+   differs from the original](#how-this-fork-differs-from-the-original) for the
+   point-by-point comparison.
 
 ## Similar Projects
 

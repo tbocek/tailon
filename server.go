@@ -57,7 +57,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 // listHandler returns the current file listing as JSON. The frontend fetches it
 // to populate the file selector. This replaces the SockJS "list" message.
 func listHandler(w http.ResponseWriter, r *http.Request) {
-	listing := createListing(config.FileSpecs)
+	listing := createListing(config.Sources)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(listing); err != nil {
 		log.Println("error: ", err)
@@ -65,17 +65,18 @@ func listHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
-	if !config.AllowDownload {
-		http.Error(w, "downloads forbidden by server", http.StatusForbidden)
-		return
-	}
-
 	path := r.URL.Query().Get("path")
 	if !fileAllowed(path) {
-		log.Printf("warn: attempt to access unknown file: %s", path)
+		log.Printf("warn: attempt to access unknown file: %q", path)
 		http.Error(w, "unknown file", http.StatusNotFound)
 		return
 	}
+	// Log files routinely contain attacker-controlled text (User-Agents, URLs, …).
+	// Serve them as a plain-text attachment with sniffing disabled, so a log line
+	// that looks like HTML can't be rendered as script in this origin.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "attachment")
 	http.ServeFile(w, r, path)
 }
 
@@ -150,6 +151,7 @@ type logLine struct {
 //	invert  "1" inverts the filter, sending only non-matching lines.
 //	nlines  in tail mode, how many trailing lines to show before following.
 //	path    the file to stream, or all=1 for every served file.
+//	scope   with all=1, limit the stream to files under this directory prefix.
 //
 // Each line is sent as an SSE "data:" frame holding the JSON-encoded line.
 // Reading, following and filtering are all done in Go — no external tail/grep.
@@ -174,7 +176,11 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	// Resolve the files to stream. "all=1" streams every served file at once.
 	var paths []string
 	if query.Get("all") == "1" {
-		paths = allowedFiles()
+		if scope := query.Get("scope"); scope != "" {
+			paths = allowedUnder(scope) // just the files under one subfolder
+		} else {
+			paths = allowedFiles()
+		}
 		if len(paths) == 0 {
 			http.Error(w, "no files to stream", http.StatusNotFound)
 			return
@@ -182,7 +188,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		path := query.Get("path")
 		if !fileAllowed(path) {
-			log.Print("Unknown file: ", path)
+			log.Printf("warn: attempt to stream unknown file: %q", path)
 			http.Error(w, "unknown file", http.StatusNotFound)
 			return
 		}
