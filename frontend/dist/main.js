@@ -21,6 +21,86 @@ const el = {};
     "cfg-invert", "cfg-wrap", "action-download", "status", "scrollable", "logview",
 ].forEach(function (id) { el[id] = document.getElementById(id); });
 
+// ANSI color support. Tools like Caddy emit SGR escape sequences such as
+// "\x1b[34mINFO\x1b[0m" (blue "INFO", then reset). We translate the color/style
+// codes into styled spans so they render as colors instead of raw escape bytes.
+// The standard 16 colors map to CSS classes (.ansi-fg-N / .ansi-bg-N) so the
+// palette lives in the stylesheet; 256-color and truecolor fall back to inline
+// styles. We build real DOM nodes (never innerHTML), so log text can't inject.
+const ANSI_RE = /\x1b\[([0-9;:]*)([A-Za-z])/g;
+
+function ansiReset() { return { bold: false, dim: false, italic: false, underline: false, fg: null, bg: null }; }
+function ansiStyled(s) { return s.bold || s.dim || s.italic || s.underline || s.fg !== null || s.bg !== null; }
+
+// xterm 256-color index (16..255) → "rgb(...)"; 0..15 use the class palette.
+function ansi256(n) {
+    if (n >= 232) { const v = 8 + (n - 232) * 10; return "rgb(" + v + "," + v + "," + v + ")"; }
+    n -= 16;
+    const f = function (c) { return c ? 55 + c * 40 : 0; };
+    return "rgb(" + f(Math.floor(n / 36) % 6) + "," + f(Math.floor(n / 6) % 6) + "," + f(n % 6) + ")";
+}
+
+// Apply one SGR sequence's parameters (e.g. "1;34") to the running style state.
+function ansiApply(style, params) {
+    const codes = params.split(/[;:]/);
+    for (let i = 0; i < codes.length; i++) {
+        const n = parseInt(codes[i] || "0", 10);
+        if (n === 0) Object.assign(style, ansiReset());
+        else if (n === 1) style.bold = true;
+        else if (n === 2) style.dim = true;
+        else if (n === 3) style.italic = true;
+        else if (n === 4) style.underline = true;
+        else if (n === 22) { style.bold = false; style.dim = false; }
+        else if (n === 23) style.italic = false;
+        else if (n === 24) style.underline = false;
+        else if (n >= 30 && n <= 37) style.fg = n - 30;
+        else if (n >= 90 && n <= 97) style.fg = n - 90 + 8;
+        else if (n === 39) style.fg = null;
+        else if (n >= 40 && n <= 47) style.bg = n - 40;
+        else if (n >= 100 && n <= 107) style.bg = n - 100 + 8;
+        else if (n === 49) style.bg = null;
+        else if (n === 38 || n === 48) { // extended: 38;5;N (256) or 38;2;R;G;B (truecolor)
+            const key = n === 38 ? "fg" : "bg";
+            if (codes[i + 1] === "5") { const idx = parseInt(codes[i + 2], 10); style[key] = idx < 16 ? idx : ansi256(idx); i += 2; }
+            else if (codes[i + 1] === "2") { style[key] = "rgb(" + (+codes[i + 2] || 0) + "," + (+codes[i + 3] || 0) + "," + (+codes[i + 4] || 0) + ")"; i += 4; }
+        }
+    }
+}
+
+// Append `text` to `parent` as a span carrying the current style (or a bare text
+// node when nothing is active). Numeric colors become classes; strings inline.
+function ansiEmit(parent, text, style) {
+    if (!text) return;
+    if (!ansiStyled(style)) { parent.appendChild(document.createTextNode(text)); return; }
+    const span = document.createElement("span");
+    const cls = [];
+    if (style.bold) cls.push("ansi-bold");
+    if (style.dim) cls.push("ansi-dim");
+    if (style.italic) cls.push("ansi-italic");
+    if (style.underline) cls.push("ansi-underline");
+    if (typeof style.fg === "number") cls.push("ansi-fg-" + style.fg);
+    else if (style.fg) span.style.color = style.fg;
+    if (typeof style.bg === "number") cls.push("ansi-bg-" + style.bg);
+    else if (style.bg) span.style.backgroundColor = style.bg;
+    if (cls.length) span.className = cls.join(" ");
+    span.textContent = text;
+    parent.appendChild(span);
+}
+
+// Parse SGR escape codes in `text` and append the styled result to `parent`.
+function appendAnsi(parent, text) {
+    if (text.indexOf("\x1b") === -1) { parent.appendChild(document.createTextNode(text)); return; }
+    const style = ansiReset();
+    let last = 0, m;
+    ANSI_RE.lastIndex = 0;
+    while ((m = ANSI_RE.exec(text)) !== null) {
+        if (m.index > last) ansiEmit(parent, text.slice(last, m.index), style);
+        if (m[2] === "m") ansiApply(style, m[1]); // ignore non-SGR sequences (cursor moves, etc.)
+        last = ANSI_RE.lastIndex;
+    }
+    if (last < text.length) ansiEmit(parent, text.slice(last), style);
+}
+
 // Log view: append-only lines. Auto-scrolls to the bottom while you're already
 // at the bottom (so new logs keep filling the screen), and caps the buffer.
 const logview = {
@@ -34,7 +114,7 @@ const logview = {
         const scroll = this.atBottom();
         const span = document.createElement("span");
         span.className = "log-entry";
-        span.textContent = text;
+        appendAnsi(span, text);
         el["logview"].appendChild(span);
         this.lines.push(span);
         while (this.lines.length > MAX_LINES) el["logview"].removeChild(this.lines.shift());

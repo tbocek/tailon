@@ -35,6 +35,12 @@
             display: block; width: 100%; margin: 32px auto; border: 1px solid var(--line);
             border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
         }
+        .diagram {
+            background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 24px; margin: 24px 0; text-align: center; min-height: 140px;
+        }
+        .diagram svg { max-width: 100%; height: auto; }
+        .mermaid:not([data-processed]) { visibility: hidden; } /* no raw-source flash before render */
         .usps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 40px 0; }
         .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
         .card h3 { margin: 0 0 8px; font-size: 17px; }
@@ -112,6 +118,45 @@ tailon -b :9000 access.log        <span class="c"># pick the port</span></pre>
     </section>
 
     <section>
+        <h2>In the wild: a self-hosted log hub</h2>
+        <p>
+            One tailon tab can stand in for <code>ssh</code>-ing into a fleet of machines. A typical deployment:
+            every service on a self-hosted server logs through the container runtime's syslog driver into a local
+            collector, while other machines on the network ship their logs to that same collector over TLS. The
+            collector (syslog-ng, rsyslog, …) writes <b>one file per source</b> into a shared directory; tailon
+            mounts it read-only and serves it behind a reverse proxy with authentication. Open <b>All files</b> and
+            every host and container becomes a single, live, timestamp-ordered stream you can grep.
+        </p>
+        <div class="diagram">
+            <pre class="mermaid">
+flowchart LR
+    subgraph remote["other machines"]
+        direction TB
+        H1["host"]
+        H2["host"]
+        H3["host"]
+    end
+    subgraph srv["self-hosted server"]
+        C["containers"]
+        S["log collector<br/>(syslog-ng)"]
+        DIR[("shared dir<br/>one file per source")]
+        T["tailon<br/>(read-only)"]
+        P["reverse proxy<br/>HTTPS · auth"]
+    end
+    B["browser<br/>tail · grep · All files"]
+
+    H1 & H2 & H3 -->|"syslog / TLS"| S
+    C -->|"syslog"| S
+    S --> DIR
+    DIR --> T --> P --> B
+
+    classDef accent fill:#ff974f,stroke:#ff974f,color:#1d1f21,font-weight:bold;
+    class T accent;
+            </pre>
+        </div>
+    </section>
+
+    <section>
         <h2>Recipes</h2>
         <div class="recipe">
             <strong>Log rotation?</strong> Let <a href="https://linux.die.net/man/8/logrotate">logrotate</a> do its job — tailon keeps following a file across rotation and truncation, reopening it automatically.
@@ -126,5 +171,21 @@ tailon -b :9000 access.log        <span class="c"># pick the port</span></pre>
         <p><a href="https://github.com/tbocek/tailon">github.com/tbocek/tailon</a></p>
     </footer>
 </div>
+<script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+        startOnLoad: false,
+        theme: "base",
+        themeVariables: {
+            background: "#1d1f21", mainBkg: "#282a2e",
+            primaryColor: "#282a2e", primaryTextColor: "#c5c8c6", primaryBorderColor: "#3a3e44",
+            secondaryColor: "#282a2e", tertiaryColor: "#1d1f21",
+            lineColor: "#8a8f98", textColor: "#c5c8c6",
+            clusterBkg: "#1d1f21", clusterBorder: "#3a3e44", edgeLabelBackground: "#1d1f21",
+            fontFamily: "\"Helvetica Neue\", Arial, sans-serif", fontSize: "15px",
+        },
+    });
+    await mermaid.run({ querySelector: ".mermaid" });
+</script>
 </body>
 </html>
