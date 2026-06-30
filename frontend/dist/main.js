@@ -1,6 +1,6 @@
 "use strict";
 
-// Tailon frontend: framework-free vanilla JavaScript. It fetches the file list
+// Tailon-ng frontend: framework-free vanilla JavaScript. It fetches the file list
 // and streams lines over Server-Sent Events. Modes: "tail" (follow) and "grep"
 // (whole file); a regexp filter (server-side, invertible) narrows the output.
 // Injected global: relativeRoot.

@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/scr.png" alt="Tailon screenshot" width="900">
+  <img src="docs/scr.png" alt="Tailon-ng screenshot" width="900">
 </p>
 
-# Tailon
+# Tailon-ng
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/tbocek/tailon)](https://goreportcard.com/report/github.com/tbocek/tailon)
-[![Apache License](https://img.shields.io/badge/license-Apache-blue.svg)](https://github.com/tbocek/tailon/blob/main/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tbocek/tailon-ng)](https://goreportcard.com/report/github.com/tbocek/tailon-ng)
+[![Apache License](https://img.shields.io/badge/license-Apache-blue.svg)](https://github.com/tbocek/tailon-ng/blob/main/LICENSE)
 
 > **This is a fork of [gvalkov/tailon].** It keeps the purpose — tail and grep your
 > log files from the browser — but rebuilds the project around the Go standard
@@ -13,7 +13,7 @@
 > single static binary. [How this fork differs from the original](#how-this-fork-differs-from-the-original)
 > spells out exactly what changed and why you might pick it over upstream.
 
-Tailon is a webapp for looking at and searching through log files from your
+Tailon-ng is a webapp for looking at and searching through log files from your
 browser. It serves files — single files, globs or whole directories — and lets
 you **tail** them live or **grep** through them, with a regular-expression
 filter (which can be inverted). Reading, following and filtering are all done
@@ -49,13 +49,13 @@ macOS, Intel and Apple Silicon). The script installs to `/usr/local/bin`, or
 `~/.local/bin` when that isn't writable:
 
 ```
-curl -sL https://raw.githubusercontent.com/tbocek/tailon/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/tbocek/tailon-ng/main/install.sh | bash
 ```
 
 Or install from source with Go (1.26+):
 
 ```
-go install github.com/tbocek/tailon@latest
+go install github.com/tbocek/tailon-ng@latest
 ```
 
 Prebuilt binaries are also attached to every entry on the [releases] page.
@@ -65,7 +65,7 @@ Prebuilt binaries are also attached to every entry on the [releases] page.
 Each file can be viewed in two modes — **tail** (follow the file live, like
 `tail -f`) or **grep** (read the whole file from the start) — and narrowed with
 an optional regular-expression **filter** that can be inverted (both set in the
-UI). Tailon itself is configured entirely with command-line flags.
+UI). Tailon-ng itself is configured entirely with command-line flags.
 
 To get started, run tailon with the files or directories you want to monitor.
 Each argument is a file, a directory, or a shell glob — `*` matches within a
@@ -106,7 +106,7 @@ tailon /var/log/remote/
 Every file beneath it — including per-host subdirectories — shows up in the file
 picker, and **All files** streams them all merged in timestamp order.
 
-Tailon's server-side functionality is summarized entirely in its help message:
+Tailon-ng's server-side functionality is summarized entirely in its help message:
 
 [//]: # (run "./tailon --help" to update the next section)
 
@@ -114,13 +114,13 @@ Tailon's server-side functionality is summarized entirely in its help message:
 ```
 Usage: tailon [options] <path> [<path> ...]
 
-Tailon is a webapp for searching through log files from your browser.
+Tailon-ng is a webapp for searching through log files from your browser.
 
   -b, --bind string            Address and port to listen on (default ":8080")
   -h, --help                   Show this help message and exit
   -r, --relative-root string   Webapp relative root (default "/")
 
-Tailon is configured entirely through command-line flags.
+Tailon-ng is configured entirely through command-line flags.
 
 Each <path> is a file, a directory, or a shell glob, where "*" matches within a
 directory and "**" across them (so "/var/log/**.log" finds .log files at any
@@ -138,11 +138,11 @@ Example usage:
 
 ## Security
 
-Tailon does not run external commands or invoke a shell. The filter is a Go
+Tailon-ng does not run external commands or invoke a shell. The filter is a Go
 ([RE2]) regular expression applied in-process, so there is no risk of shell or
 command injection from anything entered in the UI.
 
-Tailon serves — and lets clients download — exactly the files you point it at on
+Tailon-ng serves — and lets clients download — exactly the files you point it at on
 the command line. It performs no
 authentication: by default it is reachable by anyone who can connect to its
 address and port. Restrict the bind address or put it behind an authenticating
@@ -213,18 +213,18 @@ the source of the recurring "wait, which tailon?" confusion:
 Attributions
 ------------
 
-Tailon's favicon was created from [this icon].
+Tailon-ng's favicon was created from [this icon].
 
 ## License
 
-Tailon is released under the terms of the [Apache 2.0 License].
+Tailon-ng is released under the terms of the [Apache 2.0 License].
 
 [gvalkov/tailon]: https://github.com/gvalkov/tailon
 [tailon-legacy]:  https://github.com/gvalkov/tailon-legacy
 [syslog-ng]:      https://www.syslog-ng.com/
 [clarity]:        https://github.com/tobi/clarity
 [wtee]:           https://github.com/gvalkov/wtee
-[releases]:       https://github.com/tbocek/tailon/releases
+[releases]:       https://github.com/tbocek/tailon-ng/releases
 [errorlog]:       http://www.psychogenic.com/en/products/Errorlog.php
 [log.io]:         http://logio.org/
 [rtail]:          http://rtail.org/

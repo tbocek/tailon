@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs the latest tailon release binary for the current OS/architecture.
-# Usage: curl -sL https://raw.githubusercontent.com/tbocek/tailon/main/install.sh | bash
+# Installs the latest tailon-ng release binary for the current OS/architecture.
+# Usage: curl -sL https://raw.githubusercontent.com/tbocek/tailon-ng/main/install.sh | bash
 
-REPO="tbocek/tailon"
-BIN="tailon"
+REPO="tbocek/tailon-ng"
+BIN="tailon-ng"
 
 command -v curl >/dev/null || { echo "error: curl not found" >&2; exit 1; }
 

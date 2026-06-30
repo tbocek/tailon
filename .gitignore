@@ -1,6 +1,6 @@
 # Project
 node_modules/
-/tailon
+/tailon-ng
 /gin-bin
 /dist
 

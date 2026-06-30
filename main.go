@@ -12,13 +12,13 @@ import (
 )
 
 const scriptDescription = `
-Usage: tailon [options] <path> [<path> ...]
+Usage: tailon-ng [options] <path> [<path> ...]
 
-Tailon is a webapp for searching through log files from your browser.
+Tailon-ng is a webapp for searching through log files from your browser.
 `
 
 const scriptEpilog = `
-Tailon is configured entirely through command-line flags.
+Tailon-ng is configured entirely through command-line flags.
 
 Each <path> is a file, a directory, or a shell glob, where "*" matches within a
 directory and "**" across them (so "/var/log/**.log" finds .log files at any
@@ -26,11 +26,11 @@ depth). Directories are served recursively, and new files are picked up as they
 appear. Several paths can be given as separate arguments or comma-separated.
 
 Example usage:
-  tailon /var/log/syslog /var/log/auth.log
-  tailon /var/log/nginx/,/var/log/apache/
-  tailon /var/log/remote/
-  tailon "/var/log/**.log"
-  tailon -b 127.0.0.1:8080 /var/log/messages
+  tailon-ng /var/log/syslog /var/log/auth.log
+  tailon-ng /var/log/nginx/,/var/log/apache/
+  tailon-ng /var/log/remote/
+  tailon-ng "/var/log/**.log"
+  tailon-ng -b 127.0.0.1:8080 /var/log/messages
 `
 
 const scriptOptions = `  -b, --bind string            Address and port to listen on (default ":8080")
@@ -38,8 +38,8 @@ const scriptOptions = `  -b, --bind string            Address and port to listen
   -r, --relative-root string   Webapp relative root (default "/")`
 
 // gatherSources flattens the positional command-line arguments into a list of
-// paths. Each argument may itself be a comma-separated list, so "tailon a b"
-// and "tailon a,b" name the same two sources.
+// paths. Each argument may itself be a comma-separated list, so "tailon-ng a b"
+// and "tailon-ng a,b" name the same two sources.
 func gatherSources(args []string) []string {
 	var sources []string
 	for _, arg := range args {
@@ -60,7 +60,7 @@ type Config struct {
 	Sources []string
 }
 
-// defaultConfig returns Tailon's built-in configuration. There is no config
+// defaultConfig returns Tailon-ng's built-in configuration. There is no config
 // file; settings come from command-line flags.
 func defaultConfig() *Config {
 	return &Config{

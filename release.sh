@@ -32,8 +32,8 @@ EXPECTED=4   # linux amd64/arm64 + darwin amd64/arm64
 RETRIES=20
 SLEEP=10
 sha="$(git rev-list -n1 "$new_tag")"
-REL_URL="https://api.github.com/repos/tbocek/tailon/releases/tags/$new_tag"
-RUNS_URL="https://api.github.com/repos/tbocek/tailon/actions/workflows/build.yml/runs?head_sha=$sha"
+REL_URL="https://api.github.com/repos/tbocek/tailon-ng/releases/tags/$new_tag"
+RUNS_URL="https://api.github.com/repos/tbocek/tailon-ng/actions/workflows/build.yml/runs?head_sha=$sha"
 
 # gh_get URL: sets GH_BODY from the response. Aborts the whole script on a rate
 # limit (403/429) or an unreachable API, rather than masking it as "not ready".
@@ -45,7 +45,7 @@ gh_get() {
   GH_BODY="${out%$'\n'*}"
   if [ "$code" = "403" ] || [ "$code" = "429" ]; then
     echo "error: GitHub API rate limit reached (HTTP $code): you are over the 60 requests/hr unauthenticated limit." >&2
-    echo "The release may have completed anyway; check https://github.com/tbocek/tailon/releases/tag/$new_tag" >&2
+    echo "The release may have completed anyway; check https://github.com/tbocek/tailon-ng/releases/tag/$new_tag" >&2
     exit 1
   fi
 }

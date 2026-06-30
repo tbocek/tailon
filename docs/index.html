@@ -3,8 +3,8 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Tailon — a tiny, dependency-free log viewer</title>
-    <meta name="description" content="Tailon is a minimal web viewer that tails and greps your log files from the browser. No dependencies, a single static binary, around 1,000 lines of code.">
+    <title>Tailon-ng — a tiny, dependency-free log viewer</title>
+    <meta name="description" content="Tailon-ng is a minimal web viewer that tails and greps your log files from the browser. No dependencies, a single static binary, around 1,000 lines of code.">
     <style>
         :root {
             --bg: #1d1f21; --panel: #282a2e; --fg: #c5c8c6; --muted: #8a8f98;
@@ -63,15 +63,15 @@
 <body>
 <div class="wrap">
     <header>
-        <h1>Tailon<span class="dot">.</span></h1>
+        <h1>Tailon-ng<span class="dot">.</span></h1>
         <p class="tagline">A tiny, dependency-free web viewer that <strong>tail</strong>s and <strong>grep</strong>s your log files — right in the browser.</p>
         <div class="badges">
-            <a class="btn primary" href="https://github.com/tbocek/tailon">GitHub</a>
-            <a class="btn" href="https://github.com/tbocek/tailon/releases">Download</a>
+            <a class="btn primary" href="https://github.com/tbocek/tailon-ng">GitHub</a>
+            <a class="btn" href="https://github.com/tbocek/tailon-ng/releases">Download</a>
         </div>
     </header>
 
-    <img class="shot" src="scr.png" alt="Tailon — the All files view merging several logs in timestamp order">
+    <img class="shot" src="scr.png" alt="Tailon-ng — the All files view merging several logs in timestamp order">
 
     <div class="usps">
         <div class="card">
@@ -107,9 +107,9 @@
     <section>
         <h2>Install</h2>
         <p>Grab the latest release binary for your OS/arch (installs to <code>/usr/local/bin</code>, or <code>~/.local/bin</code>):</p>
-        <pre>curl -sL https://raw.githubusercontent.com/tbocek/tailon/main/install.sh | bash</pre>
+        <pre>curl -sL https://raw.githubusercontent.com/tbocek/tailon-ng/main/install.sh | bash</pre>
         <p>Or build from source with Go 1.26+:</p>
-        <pre>go install github.com/tbocek/tailon@latest</pre>
+        <pre>go install github.com/tbocek/tailon-ng@latest</pre>
     </section>
 
     <section>
@@ -172,8 +172,8 @@ flowchart LR
     </section>
 
     <footer>
-        <p>Tailon is a fork of <a href="https://github.com/gvalkov/tailon">gvalkov/tailon</a>, rebuilt to be tiny and dependency-free. Apache 2.0 licensed.</p>
-        <p><a href="https://github.com/tbocek/tailon">github.com/tbocek/tailon</a></p>
+        <p>Tailon-ng is a fork of <a href="https://github.com/gvalkov/tailon">gvalkov/tailon</a>, rebuilt to be tiny and dependency-free. Apache 2.0 licensed.</p>
+        <p><a href="https://github.com/tbocek/tailon-ng">github.com/tbocek/tailon-ng</a></p>
     </footer>
 </div>
 <script type="module">

@@ -1,3 +1,3 @@
-module github.com/tbocek/tailon
+module github.com/tbocek/tailon-ng
 
 go 1.26
