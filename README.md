@@ -116,14 +116,22 @@ view rebuilds from scratch.
 
 The web UI's file selector includes an **All files** entry (selected by default)
 that streams every served file at once, each line prefixed by its file (click
-the prefix to jump into grepping that file) and the streams **merged in
-timestamp order**. Several common formats are recognized at
+the prefix to jump into that file's grep — scrolled to, and highlighting, that
+very line) and the streams **merged in timestamp order**. Several common formats are recognized at
 (or near) the start of each line — ISO 8601 / RFC 3339, `YYYY-MM-DD HH:MM:SS`,
 slash-separated dates, Apache/CLF, Unix `ctime` and syslog (RFC 3164). The format
 is detected per file from its first lines (not guessed from a single one), and a
 line without a recognizable timestamp keeps its file's previous one, so
 multi-line entries stay together. Handy when you're watching logs from many
 hosts together.
+
+Lines are interactive: hovering highlights the line under the cursor, and
+clicking selects it — **Ctrl+click** toggles lines individually, **Shift+click**
+selects a range, clicking a selected line (or pressing **Escape**, or clicking
+the empty space below the log) clears. **Ctrl-C** then copies exactly the
+highlighted lines, confirmed by a small toast — handy for pasting a few
+relevant entries into an issue or a chat. A normal mouse drag still selects and
+copies text natively.
 
 ### Example: central syslog server
 

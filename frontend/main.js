@@ -40,8 +40,22 @@ function cacheEntry() {
 const el = {};
 [
     "file-select", "mode-select", "filter-input", "filter-apply",
-    "cfg-invert", "cfg-wrap", "action-download", "status", "scrollable", "logview",
+    "cfg-invert", "cfg-wrap", "action-download", "status", "scrollable", "logview", "toast",
 ].forEach(function (id) { el[id] = document.getElementById(id); });
+
+// Line selection: clicking a line highlights it (clicking again clears it),
+// ctrl+click toggles lines individually, shift+click selects the range from the
+// last-clicked anchor. Ctrl-C copies just the highlighted lines. The DOM class
+// "selected" is the source of truth; selAnchor is the range starting point.
+let selAnchor = null;
+
+let toastTimer = 0;
+function toast(msg) {
+    el["toast"].textContent = msg;
+    el["toast"].classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el["toast"].classList.remove("show"); }, 1800);
+}
 
 // ANSI color support. Tools like Caddy emit SGR escape sequences such as
 // "\x1b[34mINFO\x1b[0m" (blue "INFO", then reset). We translate the color/style
@@ -139,9 +153,12 @@ const logview = {
         const p = el["scrollable"];
         return Math.abs(p.scrollTop - (p.scrollHeight - p.offsetHeight)) < 50;
     },
+    locate: null, // raw text to find, select and scroll to (set by jumpToFile)
     clear: function () {
         if (this.raf) { cancelAnimationFrame(this.raf); this.raf = 0; }
         this.pending = [];
+        this.locate = null;
+        selAnchor = null;
         el["logview"].replaceChildren();
         this.lines = [];
     },
@@ -157,9 +174,10 @@ const logview = {
         if (!this.raf) this.raf = requestAnimationFrame(this.flush.bind(this));
     },
     flush: function () {
-        this.raf = 0;
+        if (this.raf) { cancelAnimationFrame(this.raf); this.raf = 0; } // also called directly at eof
         const scroll = this.atBottom();
         const frag = document.createDocumentFragment();
+        let located = null;
         for (const ln of this.pending) {
             const span = document.createElement("span");
             span.className = "log-entry";
@@ -173,6 +191,14 @@ const logview = {
                 span.appendChild(document.createTextNode(": "));
             }
             appendAnsi(span, ln.text);
+            // The line we were asked to jump to (compare with ANSI codes
+            // stripped: the clicked line's text comes from the rendered DOM).
+            if (this.locate !== null && ln.text.replace(ANSI_RE, "") === this.locate) {
+                this.locate = null;
+                located = span;
+                span.classList.add("selected");
+                selAnchor = span;
+            }
             frag.appendChild(span);
             this.lines.push(span);
         }
@@ -180,8 +206,12 @@ const logview = {
         el["logview"].appendChild(frag);
         if (this.lines.length > MAX_LINES + TRIM_CHUNK) {
             for (const old of this.lines.splice(0, this.lines.length - MAX_LINES)) old.remove();
+            // If the range anchor was trimmed away, a later shift+click should
+            // degrade to a plain click instead of silently doing nothing.
+            if (selAnchor && !selAnchor.isConnected) selAnchor = null;
         }
-        if (scroll) el["scrollable"].scrollTop = el["scrollable"].scrollHeight;
+        if (located) located.scrollIntoView({ block: "center" });
+        else if (scroll) el["scrollable"].scrollTop = el["scrollable"].scrollHeight;
     },
 };
 
@@ -229,6 +259,13 @@ function connect() {
     });
     src.addEventListener("eof", function () {
         if (entry && state.file && state.file.stale) entry.done = true; // archives are immutable
+        logview.flush(); // render what's still queued before judging the jump target
+        if (logview.locate !== null) {
+            // The whole file streamed and the jump target never appeared
+            // (rotated away, or outside the current filter).
+            logview.locate = null;
+            toast("line not found");
+        }
         src.close(); state.source = null; setStatus("");
     });
     src.onerror = function () { setStatus("reconnecting…"); };
@@ -250,8 +287,9 @@ function commonPrefix(paths) {
 }
 
 // jumpToFile selects the file in the dropdown and greps it (used by the
-// clickable per-line path prefix in multi-file streams).
-function jumpToFile(path) {
+// clickable per-line path prefix in multi-file streams). When the clicked
+// line's text is given, the grep view scrolls to that line and highlights it.
+function jumpToFile(path, text) {
     const i = state.files.findIndex(function (f) { return !f.all && f.path === path; });
     if (i < 0) return;
     el["file-select"].value = String(i);
@@ -260,7 +298,8 @@ function jumpToFile(path) {
     el["mode-select"].value = "grep";
     updateDownload();
     syncModeOptions();
-    connect();
+    connect(); // clears the view — set the jump target after
+    logview.locate = text !== undefined ? text : null;
 }
 
 // syncModeOptions disables "tail" while a rotated/compressed file is selected
@@ -344,10 +383,72 @@ function init() {
     el["filter-input"].addEventListener("change", applyFilter); // and so does focus loss
     el["filter-apply"].onclick = applyFilter;
 
-    // One delegated listener serves every per-line path prefix (logview.flush
-    // tags each link with data-path instead of attaching a closure per line).
-    el["logview"].addEventListener("click", function (e) {
-        if (e.target.classList.contains("path-link")) jumpToFile(e.target.dataset.path);
+    // One delegated listener serves every line (logview.flush attaches no
+    // per-line handlers). A plain click on the path prefix jumps to grepping
+    // that file — carrying the line's text so the grep view scrolls to it; with
+    // a modifier held it selects instead (jumping mid-range-select would jar).
+    // Clicks select: plain click highlights just that line (again to clear),
+    // ctrl+click toggles lines individually, shift+click selects the range from
+    // the last-clicked line (or acts as a plain click when there is no anchor).
+    // A drag that selected text is not a line click, and clicking the empty
+    // space below the lines clears the selection.
+    el["scrollable"].addEventListener("click", function (e) {
+        const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;
+        if (plain && e.target.classList.contains("path-link")) {
+            const entry = e.target.parentNode;
+            // The raw line text follows the "prefix: " nodes.
+            const text = entry.textContent.slice(e.target.textContent.length + 2);
+            jumpToFile(e.target.dataset.path, text);
+            return;
+        }
+        if (!window.getSelection().isCollapsed) return; // text drag-select, not a line click
+        const clearAll = function () {
+            for (const s of el["logview"].querySelectorAll(".log-entry.selected")) {
+                s.classList.remove("selected");
+            }
+        };
+        const entry = e.target.closest(".log-entry");
+        if (!entry) { clearAll(); selAnchor = null; return; } // click-away deselects
+        if (e.shiftKey && selAnchor && selAnchor.isConnected) {
+            const a = logview.lines.indexOf(selAnchor), b = logview.lines.indexOf(entry);
+            for (let i = Math.min(a, b); i <= Math.max(a, b) && i >= 0; i++) {
+                logview.lines[i].classList.add("selected");
+            }
+        } else if (plain && entry.classList.contains("selected")) {
+            clearAll(); // clicking a highlighted line unhighlights
+        } else {
+            if (plain) clearAll();
+            entry.classList.toggle("selected"); // plain: select this one; ctrl: toggle
+            selAnchor = entry.classList.contains("selected") ? entry : selAnchor;
+        }
+    });
+    // Shift+click must not trigger the browser's native text selection.
+    el["scrollable"].addEventListener("mousedown", function (e) {
+        if (e.shiftKey) e.preventDefault();
+    });
+
+    // Ctrl-C with highlighted lines copies exactly those lines — unless the
+    // user drag-selected text just now (the more recent, explicit intent) or is
+    // in an input. Escape clears the selection.
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+            for (const s of el["logview"].querySelectorAll(".log-entry.selected")) {
+                s.classList.remove("selected");
+            }
+            selAnchor = null;
+            return;
+        }
+        if (!(e.ctrlKey || e.metaKey) || e.key !== "c") return;
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+        if (!window.getSelection().isCollapsed) return; // native copy of dragged text
+        const sel = el["logview"].querySelectorAll(".log-entry.selected");
+        if (!sel.length) return; // no highlights: native copy
+        e.preventDefault();
+        const text = Array.from(sel).map(function (s) { return s.textContent; }).join("\n");
+        navigator.clipboard.writeText(text).then(
+            function () { toast(sel.length + (sel.length === 1 ? " line copied" : " lines copied")); },
+            function () { toast("copy failed"); }
+        );
     });
 
     el["file-select"].addEventListener("focus", refreshFiles);

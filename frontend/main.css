@@ -106,11 +106,47 @@ body {
     word-break: break-all;
 }
 #logview.wrap { white-space: pre-wrap; }
-#logview .log-entry { display: block; }
+
+/* Lines highlight subtly on hover and warmly when selected (click; ctrl adds,
+   shift ranges). width:max-content keeps the highlight covering long lines even
+   when scrolled horizontally; min-width fills the viewport for short ones. */
+#logview .log-entry {
+    display: block;
+    width: max-content;
+    min-width: 100%;
+    padding: 0 8px;
+    margin: 0 -8px; /* cancel #logview's side padding so the highlight is edge-to-edge */
+    transition: background-color 0.08s ease;
+}
+#logview .log-entry:hover { background: rgba(255, 255, 255, 0.045); }
+#logview .log-entry.selected {
+    background: rgba(255, 151, 79, 0.16);
+    box-shadow: inset 3px 0 0 var(--notice);
+}
+#logview .log-entry.selected:hover { background: rgba(255, 151, 79, 0.24); }
 
 /* The per-line file prefix in multi-file streams: click to grep that file. */
 #logview .path-link { color: #8a8f98; cursor: pointer; }
 #logview .path-link:hover { color: var(--notice); text-decoration: underline; }
+
+/* Toast: brief confirmation (e.g. "3 lines copied"), bottom-center. */
+#toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translate(-50%, 8px);
+    z-index: 20;
+    padding: 8px 14px;
+    background: var(--bar);
+    color: var(--fg);
+    border: 1px solid var(--notice);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* ANSI color rendering (e.g. Caddy's "\x1b[34mINFO"): the frontend turns SGR
    escape codes into spans carrying these classes. Palette matches the theme. */
