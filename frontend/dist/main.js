@@ -6,13 +6,16 @@
 // Injected global: relativeRoot.
 
 const RELATIVE_ROOT = (typeof relativeRoot !== "undefined" && relativeRoot) || "/";
-const MODES = ["tail", "grep"];
+// "tail" follows live files; "grep" reads them whole; "grep-all" additionally
+// reads rotated/compressed archives (.gz, .1, …), decoded server-side.
+const MODES = ["tail", "grep", "grep-all"];
 const TAIL_LINES = 10; // trailing lines shown when a tail starts (grep ignores it)
 const MAX_LINES = 50000; // browser-side scrollback cap
 
 const state = {
     files: [], file: null, mode: "tail", filter: "", invert: false, wrap: false,
     source: null,
+    prefix: "", // directory prefix shared by every served file, hidden in the UI
 };
 
 const el = {};
@@ -110,10 +113,21 @@ const logview = {
         return Math.abs(p.scrollTop - (p.scrollHeight - p.offsetHeight)) < 50;
     },
     clear: function () { el["logview"].replaceChildren(); this.lines = []; },
-    write: function (text) {
+    // write appends one line; path (set in multi-file streams) becomes a
+    // clickable prefix that jumps to grepping just that file.
+    write: function (path, text) {
         const scroll = this.atBottom();
         const span = document.createElement("span");
         span.className = "log-entry";
+        if (path) {
+            const link = document.createElement("a");
+            link.className = "path-link";
+            link.textContent = stripPrefix(path);
+            link.title = "grep " + path;
+            link.onclick = function () { jumpToFile(path); };
+            span.appendChild(link);
+            span.appendChild(document.createTextNode(": "));
+        }
         appendAnsi(span, text);
         el["logview"].appendChild(span);
         this.lines.push(span);
@@ -142,9 +156,50 @@ function connect() {
     const src = new EventSource(RELATIVE_ROOT + "stream?" + p.toString());
     state.source = src;
     src.onopen = function () { setStatus(""); };
-    src.onmessage = function (e) { logview.write(JSON.parse(e.data)); };
+    src.onmessage = function (e) { const d = JSON.parse(e.data); logview.write(d.p, d.t); };
     src.addEventListener("eof", function () { src.close(); state.source = null; setStatus(""); });
     src.onerror = function () { setStatus("reconnecting…"); };
+}
+
+// stripPrefix hides the directory prefix common to every served file — with a
+// single tree like /var/log/remote/ the noise-free remainder is what you read.
+function stripPrefix(path) {
+    return state.prefix && path.indexOf(state.prefix) === 0 ? path.slice(state.prefix.length) : path;
+}
+
+// commonPrefix returns the directory prefix (up to a "/") shared by all paths,
+// or "" when there is none (or just one path component).
+function commonPrefix(paths) {
+    if (!paths.length) return "";
+    let p = paths[0];
+    paths.forEach(function (q) { while (p && q.indexOf(p) !== 0) p = p.slice(0, -1); });
+    return p.slice(0, p.lastIndexOf("/") + 1);
+}
+
+// jumpToFile selects the file in the dropdown and greps it (used by the
+// clickable per-line path prefix in multi-file streams).
+function jumpToFile(path) {
+    const i = state.files.findIndex(function (f) { return !f.all && f.path === path; });
+    if (i < 0) return;
+    el["file-select"].value = String(i);
+    state.file = state.files[i];
+    state.mode = "grep";
+    el["mode-select"].value = "grep";
+    updateDownload();
+    syncModeOptions();
+    connect();
+}
+
+// syncModeOptions disables "tail" while a rotated/compressed file is selected
+// (it will never grow, so it can only be grepped) and switches to grep. It only
+// adjusts state — the caller connects.
+function syncModeOptions() {
+    const stale = state.file && state.file.stale;
+    el["mode-select"].options[MODES.indexOf("tail")].disabled = !!stale;
+    if (stale && state.mode === "tail") {
+        state.mode = "grep";
+        el["mode-select"].value = "grep";
+    }
 }
 
 async function refreshFiles() {
@@ -154,6 +209,7 @@ async function refreshFiles() {
 
     const prev = state.file && (state.file.scope || state.file.path);
     state.files = [];
+    state.prefix = commonPrefix(data.map(function (e) { return e.path; }));
     el["file-select"].replaceChildren();
 
     el["file-select"].add(new Option("All files", "0"));
@@ -172,12 +228,13 @@ async function refreshFiles() {
     });
     Object.keys(counts).filter(function (d) { return counts[d] < data.length; }).sort()
         .forEach(function (d) {
-            el["file-select"].add(new Option("▸ " + d + "/", String(state.files.length)));
+            el["file-select"].add(new Option("▸ " + stripPrefix(d) + "/", String(state.files.length)));
             state.files.push({ path: d, scope: d, all: true });
         });
 
     data.forEach(function (entry) {
-        el["file-select"].add(new Option(entry.path, String(state.files.length)));
+        const label = stripPrefix(entry.path) + (entry.stale ? "  (archived)" : "");
+        el["file-select"].add(new Option(label, String(state.files.length)));
         state.files.push(entry);
     });
 
@@ -186,6 +243,7 @@ async function refreshFiles() {
     if (i < 0) i = state.files.length ? 0 : -1;
     state.file = i >= 0 ? state.files[i] : null;
     if (i >= 0) el["file-select"].value = String(i);
+    syncModeOptions();
 }
 
 function updateDownload() {
@@ -217,6 +275,7 @@ function init() {
     el["file-select"].onchange = function () {
         state.file = state.files[Number(el["file-select"].value)];
         updateDownload();
+        syncModeOptions(); // an archive can only be grepped
         connect();
     };
 

@@ -18,11 +18,21 @@ type ListEntry struct {
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"mtime"`
 	Exists  bool      `json:"exists"`
+	Stale   bool      `json:"stale"` // rotated/compressed: no longer written to
 }
+
+// staleRE matches the file-name shapes log rotation leaves behind: a compressed
+// extension (.gz/.bz2/.xz/.zst), a numeric rotation suffix (.1, .2.gz), a date
+// suffix (-20260702 or .20260702, optionally compressed), or .old/.bak. Such
+// files are never written to again, so they are excluded from live tailing.
+var staleRE = regexp.MustCompile(`(?i)(\.(gz|bz2|xz|zst)|\.\d+|[.-]\d{8}|\.(old|bak))$`)
+
+func isStale(path string) bool { return staleRE.MatchString(path) }
 
 func fileInfo(path string) *ListEntry {
 	entry := ListEntry{}
 	entry.Path = path
+	entry.Stale = isStale(path)
 
 	info, err := os.Stat(path)
 	if !os.IsNotExist(err) {

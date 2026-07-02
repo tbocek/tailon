@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Tailon-ng — a tiny, dependency-free log viewer</title>
-    <meta name="description" content="Tailon-ng is a minimal web viewer that tails and greps your log files from the browser. No dependencies, a single static binary, around 1,000 lines of code.">
+    <meta name="description" content="Tailon-ng is a minimal web viewer that tails and greps your log files from the browser. A single static binary, about 1,200 lines of code, almost entirely Go standard library.">
     <style>
         :root {
             --bg: #1d1f21; --panel: #282a2e; --fg: #c5c8c6; --muted: #8a8f98;
@@ -83,12 +83,12 @@
             <p>Tailon-ng does <b>no authentication</b> of its own — anyone who can reach its port can read the served files. Bind it to localhost or run it behind an authenticating reverse proxy. It's a log viewer, not a gateway.</p>
         </div>
         <div class="card">
-            <h3>No dependencies</h3>
-            <p>The backend is pure Go standard library; the frontend is vanilla HTML/CSS/JS. No frameworks, no npm, no external <code>tail</code>/<code>grep</code>.</p>
+            <h3>Almost no dependencies</h3>
+            <p>Go standard library throughout, plus exactly two pure-Go decompression libraries (xz, zstd) for reading rotated archives. Vanilla HTML/CSS/JS frontend — no frameworks, no npm, no external <code>tail</code>/<code>grep</code>.</p>
         </div>
         <div class="card">
             <h3>Minimal code</h3>
-            <p>Around 1,000 lines of code, total. Small enough to read in one sitting and audit before you run it on a server.</p>
+            <p>About 1,200 lines of code, total. Small enough to read in one sitting and audit before you run it on a server.</p>
         </div>
         <div class="card">
             <h3>Single binary</h3>
@@ -101,6 +101,10 @@
         <div class="card">
             <h3>Group by date</h3>
             <p>The <b>All files</b> view merges many logs in timestamp order (ISO&nbsp;8601, syslog, Apache, ctime…), so you read events across hosts chronologically.</p>
+        </div>
+        <div class="card">
+            <h3>Rotation-aware</h3>
+            <p>Rotated archives (<code>.gz</code>, <code>.xz</code>, <code>.zst</code>, <code>.1</code>, date-stamped) never pollute live tailing. Select one to grep it decoded, or use <b>grep-all</b> to search live logs and every archive at once.</p>
         </div>
         <div class="card">
             <h3>Stream over SSE</h3>

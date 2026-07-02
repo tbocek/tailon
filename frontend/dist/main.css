@@ -27,12 +27,24 @@ body {
 #toolbar {
     flex: 0 0 auto;
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap; /* always a single row: the selects and filter shrink instead */
     align-items: center;
     gap: 12px;
     padding: 6px 8px;
     background: var(--bar);
     border-bottom: 1px solid #16181a;
+}
+
+/* On narrow windows the file selector and filter give way first; the fixed
+   controls (mode, checkboxes, download) keep their size. */
+#file-select { flex: 0 1 auto; min-width: 7em; }
+#toolbar label,
+#mode-select,
+#filter-apply,
+#action-download { flex: 0 0 auto; }
+
+@media (max-width: 800px) {
+    #toolbar { gap: 6px; }
 }
 
 #toolbar select,
@@ -53,9 +65,10 @@ body {
 #toolbar label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 #toolbar input[type="checkbox"] { height: auto; margin: 0; border: 0; }
 
-/* The filter input and its apply button form one tight group. */
-#toolbar .filter { display: flex; align-items: center; gap: 4px; flex: 0 1 32em; }
-#filter-input { flex: 1 1 auto; min-width: 6em; text-align: left; }
+/* The filter input and its apply button form one tight group. It takes the
+   spare width on large windows and shrinks before anything else on small ones. */
+#toolbar .filter { display: flex; align-items: center; gap: 4px; flex: 1 1 8em; min-width: 7em; }
+#filter-input { flex: 1 1 auto; min-width: 3em; text-align: left; }
 #filter-input::placeholder { color: #888; font-style: italic; }
 
 /* Full-height vertical separators between the toolbar's control groups. */
@@ -94,6 +107,10 @@ body {
 }
 #logview.wrap { white-space: pre-wrap; }
 #logview .log-entry { display: block; }
+
+/* The per-line file prefix in multi-file streams: click to grep that file. */
+#logview .path-link { color: #8a8f98; cursor: pointer; }
+#logview .path-link:hover { color: var(--notice); text-decoration: underline; }
 
 /* ANSI color rendering (e.g. Caddy's "\x1b[34mINFO"): the frontend turns SGR
    escape codes into spans carrying these classes. Palette matches the theme. */

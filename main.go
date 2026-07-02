@@ -25,6 +25,10 @@ directory and "**" across them (so "/var/log/**.log" finds .log files at any
 depth). Directories are served recursively, and new files are picked up as they
 appear. Several paths can be given as separate arguments or comma-separated.
 
+Rotation leftovers (.gz, .bz2, .xz, .zst, .1, -YYYYMMDD, .old, .bak) are listed
+but excluded from live tailing and plain grep. The web UI's grep-all mode also
+searches them, decompressed transparently.
+
 Example usage:
   tailon-ng /var/log/syslog /var/log/auth.log
   tailon-ng /var/log/nginx/,/var/log/apache/

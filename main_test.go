@@ -15,6 +15,31 @@ func TestGatherSources(t *testing.T) {
 	}
 }
 
+func TestIsStale(t *testing.T) {
+	cases := []struct {
+		path  string
+		stale bool
+	}{
+		{"/var/log/syslog", false},
+		{"/var/log/remote/OpenWrt.log", false},
+		{"/var/log/remote/192.168.1.5.log-20260702.gz", true}, // logrotate dateext + compress
+		{"/var/log/messages.1", true},                         // numeric rotation
+		{"/var/log/messages.2.gz", true},
+		{"/var/log/app.log-20260702", true}, // dateext before compression (delaycompress)
+		{"/var/log/app.log.20260702", true},
+		{"/var/log/app.log.bz2", true},
+		{"/var/log/app.log.xz", true},
+		{"/var/log/app.log.zst", true},
+		{"/var/log/app.log.old", true},
+		{"/var/log/app.log.bak", true},
+	}
+	for _, c := range cases {
+		if got := isStale(c.path); got != c.stale {
+			t.Errorf("isStale(%q) = %v, want %v", c.path, got, c.stale)
+		}
+	}
+}
+
 func paths(entries []*ListEntry) []string {
 	out := make([]string, len(entries))
 	for i, e := range entries {

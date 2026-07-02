@@ -146,20 +146,24 @@ type logLine struct {
 // over Server-Sent Events. Query parameters:
 //
 //	mode    "tail" (default) follows the file like tail -f; "grep" reads the
-//	        whole file once, from the start, without following.
+//	        whole file once, from the start, without following. Aggregate
+//	        streams skip rotated/compressed files in both, unless the mode is
+//	        "grep-all", which also reads the archives (decoded).
 //	filter  optional regular expression; only matching lines are sent.
 //	invert  "1" inverts the filter, sending only non-matching lines.
 //	nlines  in tail mode, how many trailing lines to show before following.
 //	path    the file to stream, or all=1 for every served file.
 //	scope   with all=1, limit the stream to files under this directory prefix.
 //
-// Each line is sent as an SSE "data:" frame holding the JSON-encoded line.
-// Reading, following and filtering are all done in Go — no external tail/grep.
+// Each line is one SSE "data:" frame holding a JSON object: "t" is the line's
+// text and "p", present when several files are streamed at once, the file it
+// came from. Reading, following and filtering are all done in Go.
 func streamHandler(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	query := r.URL.Query()
 
-	follow := query.Get("mode") != "grep" // "tail" follows; "grep" reads once
+	mode := query.Get("mode")
+	follow := mode != "grep" && mode != "grep-all" // "tail" follows; grep modes read once
 	nlines, _ := strconv.Atoi(query.Get("nlines"))
 	invert := query.Get("invert") == "1"
 
@@ -174,12 +178,24 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the files to stream. "all=1" streams every served file at once.
+	// Rotated/compressed leftovers are skipped in aggregate streams — tailing
+	// them is meaningless and their raw bytes are garbage — unless the mode is
+	// "grep-all", which searches the archives too.
 	var paths []string
 	if query.Get("all") == "1" {
 		if scope := query.Get("scope"); scope != "" {
 			paths = allowedUnder(scope) // just the files under one subfolder
 		} else {
 			paths = allowedFiles()
+		}
+		if mode != "grep-all" {
+			live := paths[:0]
+			for _, p := range paths {
+				if !isStale(p) {
+					live = append(live, p)
+				}
+			}
+			paths = live
 		}
 		if len(paths) == 0 {
 			http.Error(w, "no files to stream", http.StatusNotFound)
@@ -191,6 +207,9 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("warn: attempt to stream unknown file: %q", path)
 			http.Error(w, "unknown file", http.StatusNotFound)
 			return
+		}
+		if isStale(path) {
+			follow = false // a rotation leftover never grows; force one grep pass
 		}
 		paths = []string{path}
 	}
@@ -226,11 +245,14 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		return filter == nil || filter.MatchString(text) != invert
 	}
 	writeLine := func(ln logLine) bool {
-		text := ln.text
+		frame := struct {
+			Path string `json:"p,omitempty"` // set when several files are streamed
+			Text string `json:"t"`
+		}{Text: ln.text}
 		if multi {
-			text = ln.path + ": " + text
+			frame.Path = ln.path
 		}
-		data, _ := json.Marshal(text)
+		data, _ := json.Marshal(frame)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 			return false
 		}

@@ -9,17 +9,19 @@
 
 > **This is a fork of [gvalkov/tailon].** It keeps the purpose — tail and grep your
 > log files from the browser — but rebuilds the project around the Go standard
-> library alone: **zero third-party dependencies**, no JavaScript toolchain, and a
-> single static binary. [How this fork differs from the original](#how-this-fork-differs-from-the-original)
+> library: **two third-party dependencies** (pure-Go xz/zstd decoders for rotated
+> archives, nothing else), no JavaScript toolchain, and a single static binary.
+> [How this fork differs from the original](#how-this-fork-differs-from-the-original)
 > spells out exactly what changed and why you might pick it over upstream.
 
 Tailon-ng is a webapp for looking at and searching through log files from your
 browser. It serves files — single files, globs or whole directories — and lets
 you **tail** them live or **grep** through them, with a regular-expression
 filter (which can be inverted). Reading, following and filtering are all done
-natively in Go: tailon-ng never shells out to `tail`, `grep` or any other tool, and
-it has **no dependencies** — just the Go standard library, shipped as a single
-static binary.
+natively in Go: tailon-ng never shells out to `tail`, `grep` or any other tool.
+It is almost entirely Go standard library — the only third-party code is two
+small, pure-Go decompression libraries ([ulikunitz/xz] and [klauspost/compress]
+for zstd) used to read rotated archives — and ships as a single static binary.
 
 **Security posture, up front:** tailon-ng has **no built-in authentication** —
 anyone who can reach its port can read the files it serves, so bind it to
@@ -36,7 +38,7 @@ lineage](#project-lineage)). Same job, far less machinery:
 
 | Area | [gvalkov/tailon] (upstream) | This fork |
 | --- | --- | --- |
-| Third-party dependencies | Vue.js, SockJS, build-time tooling | **None** — Go standard library only |
+| Third-party dependencies | Vue.js, SockJS, build-time tooling | **Two** pure-Go decompression libraries (xz, zstd); everything else is standard library |
 | Frontend | Vue.js single-page app | Framework-free vanilla HTML/CSS/JS |
 | Live updates | SockJS | Server-Sent Events |
 | Frontend assets | produced by a code-generation/build step | embedded with `//go:embed`, no build step |
@@ -90,9 +92,17 @@ subdirectories) is available, and new files are picked up as they appear. The
 file selector also lists each subfolder, so you can tail or grep just the logs
 beneath one of them.
 
+Rotated and compressed logs are handled the way you'd want: files that are no
+longer written to (`.gz`, `.bz2`, `.xz`, `.zst`, numeric `.1`, date-stamped
+`-YYYYMMDD`, `.old`, `.bak`) are listed as *archived* but excluded from live
+tailing, so compressed bytes never pollute the stream. Selecting one greps it
+with the compression decoded transparently, and the **grep-all** mode searches
+live files *and* every archive together.
+
 The web UI's file selector includes an **All files** entry (selected by default)
-that streams every served file at once, each line prefixed by its file and the
-streams **merged in timestamp order**. Several common formats are recognized at
+that streams every served file at once, each line prefixed by its file (click
+the prefix to jump into grepping that file) and the streams **merged in
+timestamp order**. Several common formats are recognized at
 (or near) the start of each line — ISO 8601 / RFC 3339, `YYYY-MM-DD HH:MM:SS`,
 slash-separated dates, Apache/CLF, Unix `ctime` and syslog (RFC 3164). The format
 is detected per file from its first lines (not guessed from a single one), and a
@@ -134,6 +144,10 @@ directory and "**" across them (so "/var/log/**.log" finds .log files at any
 depth). Directories are served recursively, and new files are picked up as they
 appear. Several paths can be given as separate arguments or comma-separated.
 
+Rotation leftovers (.gz, .bz2, .xz, .zst, .1, -YYYYMMDD, .old, .bak) are listed
+but excluded from live tailing and plain grep. The web UI's grep-all mode also
+searches them, decompressed transparently.
+
 Example usage:
   tailon-ng /var/log/syslog /var/log/auth.log
   tailon-ng /var/log/nginx/,/var/log/apache/
@@ -171,10 +185,12 @@ and rebuild the binary. The UI talks to the backend over Server-Sent Events.
 
 ### Backend
 
-The backend is written in straightforward Go using **only the standard library** —
-there are no third-party dependencies. Flag parsing, configuration, HTTP serving,
-access logging, file following and regexp filtering for the Server-Sent Events
-stream are all standard library. File reading and following live in `tailer.go`.
+The backend is written in straightforward Go, almost entirely standard library:
+flag parsing, configuration, HTTP serving, access logging, file following,
+regexp filtering and gzip/bzip2 decoding for the Server-Sent Events stream. The
+only third-party dependencies are [ulikunitz/xz] and [klauspost/compress],
+which decode `.xz` and `.zst` archives. File reading and following live in
+`tailer.go`.
 
 ### TODO
 
@@ -191,8 +207,6 @@ stream are all standard library. File reading and following live in `tailer.go`.
 * Windows support (can use one of the Go tail implementations).
 
 * Implement [wtee].
-
-* Support ANSI color codes.
 
 ### Testing
 
@@ -241,4 +255,6 @@ Tailon-ng is released under the terms of the [Apache 2.0 License].
 [rtail]:          http://rtail.org/
 [this icon]:      http://www.iconfinder.com/icondetails/15150/48/terminal_icon
 [RE2]:            https://github.com/google/re2/wiki/Syntax
+[ulikunitz/xz]:   https://github.com/ulikunitz/xz
+[klauspost/compress]: https://github.com/klauspost/compress
 [Apache 2.0 License]: LICENSE

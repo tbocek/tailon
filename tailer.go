@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 // pollInterval is how often follow mode checks a file for newly appended data.
@@ -18,6 +24,14 @@ const pollInterval = 250 * time.Millisecond
 // non-follow mode it reads the whole file once, from the start, and returns at
 // EOF. This replaces shelling out to tail and grep.
 func streamFile(ctx context.Context, path string, follow bool, nlines int, send func(string)) {
+	// Compressed archives are decoded transparently and always read whole, from
+	// the start: they are rotation leftovers that will never grow, so following
+	// them (or sampling their trailing bytes) is meaningless.
+	if decoder(path) != nil {
+		streamCompressed(ctx, path, send)
+		return
+	}
+
 	var offset int64
 	if follow {
 		lines, size := lastLines(path, nlines)
@@ -84,6 +98,51 @@ func streamFile(ctx context.Context, path string, follow bool, nlines int, send 
 			return
 		}
 		if !sleep(ctx, pollInterval) {
+			return
+		}
+	}
+}
+
+// decoder returns a constructor for the decompressor matching the file's
+// extension, or nil for plain files. gzip and bzip2 come from the standard
+// library; xz and zstd are the project's only third-party dependencies.
+func decoder(path string) func(io.Reader) (io.Reader, error) {
+	switch {
+	case strings.HasSuffix(path, ".gz"):
+		return func(r io.Reader) (io.Reader, error) { return gzip.NewReader(r) }
+	case strings.HasSuffix(path, ".bz2"):
+		return func(r io.Reader) (io.Reader, error) { return bzip2.NewReader(r), nil }
+	case strings.HasSuffix(path, ".xz"):
+		return func(r io.Reader) (io.Reader, error) { return xz.NewReader(r) }
+	case strings.HasSuffix(path, ".zst"):
+		return func(r io.Reader) (io.Reader, error) { return zstd.NewReader(r) }
+	}
+	return nil
+}
+
+// streamCompressed sends each line of a compressed archive, decoded. Reading is
+// line-buffered rather than whole-file, so large archives don't sit in memory.
+func streamCompressed(ctx context.Context, path string, send func(string)) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	r, err := decoder(path)(f)
+	if err != nil {
+		send("tailon-ng: cannot decompress " + path + ": " + err.Error())
+		return
+	}
+
+	br := bufio.NewReader(r)
+	for ctx.Err() == nil {
+		line, err := br.ReadString('\n')
+		line = strings.TrimRight(line, "\r\n")
+		if line != "" || err == nil {
+			send(line)
+		}
+		if err != nil {
 			return
 		}
 	}

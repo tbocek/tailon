@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -71,30 +76,49 @@ func TestListingNoRace(t *testing.T) {
 	wg.Wait()
 }
 
-// readSSEData reads up to n SSE "data:" payloads from r, failing after timeout.
-func readSSEData(t *testing.T, r io.Reader, n int, timeout time.Duration) []string {
+// sseFrame mirrors the JSON object sent per line: T is the text, P the source
+// file (set only in multi-file streams).
+type sseFrame struct {
+	P string `json:"p"`
+	T string `json:"t"`
+}
+
+// readSSEData reads up to n SSE "data:" frames from r, failing after timeout.
+func readSSEData(t *testing.T, r io.Reader, n int, timeout time.Duration) []sseFrame {
 	t.Helper()
-	out := make(chan []string, 1)
+	out := make(chan []sseFrame, 1)
 	go func() {
-		var lines []string
+		var frames []sseFrame
 		scanner := bufio.NewScanner(r)
-		for len(lines) < n && scanner.Scan() {
+		for len(frames) < n && scanner.Scan() {
 			if data, ok := strings.CutPrefix(scanner.Text(), "data: "); ok {
-				lines = append(lines, data)
+				var f sseFrame
+				if err := json.Unmarshal([]byte(data), &f); err != nil {
+					t.Errorf("bad SSE frame %q: %v", data, err)
+				}
+				frames = append(frames, f)
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			t.Errorf("reading SSE stream: %v", err)
 		}
-		out <- lines
+		out <- frames
 	}()
 	select {
-	case lines := <-out:
-		return lines
+	case frames := <-out:
+		return frames
 	case <-time.After(timeout):
 		t.Fatalf("timed out waiting for %d SSE frames", n)
 		return nil
 	}
+}
+
+func frameTexts(frames []sseFrame) []string {
+	out := make([]string, len(frames))
+	for i, f := range frames {
+		out[i] = f.T
+	}
+	return out
 }
 
 // TestStreamTail checks tail mode shows the last nlines lines.
@@ -112,8 +136,8 @@ func TestStreamTail(t *testing.T) {
 		t.Errorf("Content-Type = %q", ct)
 	}
 
-	got := readSSEData(t, resp.Body, 2, 5*time.Second)
-	if want := []string{`"2"`, `"3"`}; !reflect.DeepEqual(got, want) {
+	got := frameTexts(readSSEData(t, resp.Body, 2, 5*time.Second))
+	if want := []string{"2", "3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
@@ -130,8 +154,8 @@ func TestStreamGrep(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	got := readSSEData(t, resp.Body, 3, 5*time.Second)
-	if want := []string{`"1"`, `"2"`, `"3"`}; !reflect.DeepEqual(got, want) {
+	got := frameTexts(readSSEData(t, resp.Body, 3, 5*time.Second))
+	if want := []string{"1", "2", "3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
@@ -148,9 +172,9 @@ func TestStreamFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := readSSEData(t, resp.Body, 1, 5*time.Second)
+	got := frameTexts(readSSEData(t, resp.Body, 1, 5*time.Second))
 	resp.Body.Close()
-	if want := []string{`"2"`}; !reflect.DeepEqual(got, want) {
+	if want := []string{"2"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("filter: got %v, want %v", got, want)
 	}
 
@@ -159,9 +183,9 @@ func TestStreamFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = readSSEData(t, resp.Body, 2, 5*time.Second)
+	got = frameTexts(readSSEData(t, resp.Body, 2, 5*time.Second))
 	resp.Body.Close()
-	if want := []string{`"1"`, `"3"`}; !reflect.DeepEqual(got, want) {
+	if want := []string{"1", "3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("invert: got %v, want %v", got, want)
 	}
 }
@@ -189,7 +213,9 @@ func TestStreamFollow(t *testing.T) {
 	readData := func() string {
 		for scanner.Scan() {
 			if d, ok := strings.CutPrefix(scanner.Text(), "data: "); ok {
-				return d
+				var f sseFrame
+				json.Unmarshal([]byte(d), &f)
+				return f.T
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -197,10 +223,10 @@ func TestStreamFollow(t *testing.T) {
 		}
 		return ""
 	}
-	if got := readData(); got != `"a"` {
+	if got := readData(); got != "a" {
 		t.Fatalf("first line: %q", got)
 	}
-	if got := readData(); got != `"b"` {
+	if got := readData(); got != "b" {
 		t.Fatalf("second line: %q", got)
 	}
 
@@ -216,7 +242,7 @@ func TestStreamFollow(t *testing.T) {
 	go func() { done <- readData() }()
 	select {
 	case got := <-done:
-		if got != `"c"` {
+		if got != "c" {
 			t.Fatalf("followed line: %q", got)
 		}
 	case <-time.After(5 * time.Second):
@@ -239,13 +265,12 @@ func TestStreamAllFiles(t *testing.T) {
 	got := readSSEData(t, resp.Body, 2, 5*time.Second)
 	found := false
 	for _, frame := range got {
-		var s string
-		if json.Unmarshal([]byte(frame), &s) == nil && strings.Contains(s, "testdata/ex1/var/log/") {
+		if strings.Contains(frame.P, "testdata/ex1/var/log/") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected path-prefixed lines, got %v", got)
+		t.Fatalf("expected frames carrying their source path, got %v", got)
 	}
 }
 
@@ -278,11 +303,8 @@ func TestStreamAllFilesSorted(t *testing.T) {
 	got := readSSEData(t, resp.Body, 4, 5*time.Second)
 	var markers []string
 	for _, frame := range got {
-		var s string
-		if json.Unmarshal([]byte(frame), &s) == nil {
-			f := strings.Fields(s)
-			markers = append(markers, f[len(f)-1])
-		}
+		f := strings.Fields(frame.T)
+		markers = append(markers, f[len(f)-1])
 	}
 	if want := []string{"a1", "b2", "a3", "b4"}; !reflect.DeepEqual(markers, want) {
 		t.Fatalf("merge order: got %v, want %v (frames %v)", markers, want, got)
@@ -316,13 +338,103 @@ func TestStreamScopedSubfolder(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Two files under host1, so lines are path-prefixed; none may be from host2.
+	// Two files under host1, so frames carry their path; none may be from host2.
 	got := readSSEData(t, resp.Body, 2, 5*time.Second)
 	for _, frame := range got {
-		var s string
-		if json.Unmarshal([]byte(frame), &s); !strings.Contains(s, "host1") || strings.Contains(s, "host2") {
-			t.Fatalf("scope leaked outside host1: %q", s)
+		if !strings.Contains(frame.P, "host1") || strings.Contains(frame.P, "host2") {
+			t.Fatalf("scope leaked outside host1: %+v", frame)
 		}
+	}
+}
+
+// writeArchives fills a directory with one live log and gz/xz/zst archives,
+// then points the global config at it.
+func writeArchives(t *testing.T) (dir string) {
+	t.Helper()
+	dir = t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "live.log"), []byte("live1\nlive2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte("from-gz\n"))
+	zw.Close()
+	os.WriteFile(filepath.Join(dir, "old.log.gz"), gz.Bytes(), 0o644)
+
+	var xzBuf bytes.Buffer
+	xw, err := xz.NewWriter(&xzBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xw.Write([]byte("from-xz\n"))
+	xw.Close()
+	os.WriteFile(filepath.Join(dir, "old.log.xz"), xzBuf.Bytes(), 0o644)
+
+	var zstBuf bytes.Buffer
+	sw, err := zstd.NewWriter(&zstBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sw.Write([]byte("from-zst\n"))
+	sw.Close()
+	os.WriteFile(filepath.Join(dir, "old.log.zst"), zstBuf.Bytes(), 0o644)
+
+	config = defaultConfig()
+	config.Sources = []string{dir}
+	createListing(config.Sources)
+	return dir
+}
+
+// TestGrepAllModes checks that aggregate grep skips archives while grep-all
+// reads them, decoded.
+func TestGrepAllModes(t *testing.T) {
+	writeArchives(t)
+	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
+	defer srv.Close()
+
+	// grep: live files only — exactly the two live lines, then EOF.
+	resp, err := http.Get(srv.URL + "?mode=grep&all=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := frameTexts(readSSEData(t, resp.Body, 2, 5*time.Second))
+	resp.Body.Close()
+	if want := []string{"live1", "live2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("grep(all): got %v, want %v", got, want)
+	}
+
+	// grep-all: archives included and transparently decoded.
+	resp, err = http.Get(srv.URL + "?mode=grep-all&all=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := readSSEData(t, resp.Body, 5, 5*time.Second)
+	resp.Body.Close()
+	texts := strings.Join(frameTexts(frames), " ")
+	for _, want := range []string{"live1", "from-gz", "from-xz", "from-zst"} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("grep-all missing %q in %q", want, texts)
+		}
+	}
+}
+
+// TestStaleForcedToGrep checks that tail on an archive is coerced into a single
+// decoded grep pass instead of following compressed bytes.
+func TestStaleForcedToGrep(t *testing.T) {
+	dir := writeArchives(t)
+	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "?mode=tail&nlines=5&path=" + url.QueryEscape(filepath.Join(dir, "old.log.gz")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got := frameTexts(readSSEData(t, resp.Body, 1, 5*time.Second))
+	if want := []string{"from-gz"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tail on .gz: got %v, want %v", got, want)
 	}
 }
 
