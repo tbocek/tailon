@@ -6,9 +6,17 @@
 // Injected global: relativeRoot.
 
 const RELATIVE_ROOT = (typeof relativeRoot !== "undefined" && relativeRoot) || "/";
-// "tail" follows live files; "grep" reads them whole; "grep-all" additionally
-// reads rotated/compressed archives (.gz, .1, …), decoded server-side.
-const MODES = ["tail", "grep", "grep-all"];
+// "tail" follows live files (the filter input filters them); "find" searches
+// the selection server-side for the first matches per file with context —
+// bounded and fast on any file size; "find-all" also searches rotated archives
+// (.gz, .1, …), decoded server-side. "view" (wire value "grep") shows a whole
+// file: it is also what clicking a find result or a line's file prefix opens.
+const MODES = [
+    { value: "tail", label: "tail" },
+    { value: "find", label: "find" },
+    { value: "find-all", label: "find-all" },
+    { value: "grep", label: "view" },
+];
 const TAIL_LINES = 10; // trailing lines shown when a tail starts (grep ignores it)
 const MAX_LINES = 50000; // browser-side scrollback cap
 
@@ -227,23 +235,33 @@ const logview = {
 
 function setStatus(text) { el["status"].textContent = text; el["status"].hidden = !text; }
 
-// setLoading toggles the progress bar under the toolbar and the
-// scroll-suppressed loading mode (see logview.loading). The bar starts as an
-// indeterminate sweep and turns into a real 0-100 bar on the first "progress"
-// event; loads without byte progress (compressed archives) keep the sweep.
-function setLoading(on) {
+// setLoading toggles the progress bar under the toolbar and (unless holdView
+// is false — tail keeps bottom-following) the scroll-suppressed loading mode,
+// see logview.loading. The bar starts as an indeterminate sweep and turns into
+// a real 0-100 bar on the first "progress" event; loads without byte progress
+// (compressed archives, tail catch-up, find) keep the sweep.
+function setLoading(on, holdView) {
     el["loading"].hidden = !on;
     el["loading"].classList.add("indeterminate");
     el["loading"].style.backgroundSize = "0% 100%";
-    logview.loading = on;
+    logview.loading = on && holdView !== false;
     if (on) logview.userScrolled = false;
 }
 
 function connect() {
     if (state.source) { state.source.close(); state.source = null; }
     if (!state.file) return;
+    findSeq++; // any in-flight search result is for a view that no longer exists
     logview.clear();
     setLoading(false);
+    setStatus("");
+
+    // The one text input is the live filter in tail/view and the search query
+    // in the find modes (where inverting makes no sense).
+    const finding = state.mode.indexOf("find") === 0;
+    el["filter-input"].placeholder = finding ? "find (regexp)" : "filter (regexp)";
+    el["cfg-invert"].parentElement.style.display = finding ? "none" : "";
+    if (finding) { findRequest(); return; }
 
     const p = new URLSearchParams({ mode: state.mode, filter: state.filter, nlines: String(TAIL_LINES) });
     if (state.invert) p.set("invert", "1");
@@ -261,9 +279,11 @@ function connect() {
     }
 
     setStatus("connecting…");
-    // Grep modes are a bounded load ending in EOF: show the loading sweep and
-    // hold the view still until then. Tail keeps its live bottom-following.
+    // View loads end in EOF: hold the view still and show the bar until then.
+    // Tail shows the bar just for its initial catch-up (the server says when
+    // with a "live" event) and keeps its bottom-following throughout.
     if (state.mode !== "tail") setLoading(true);
+    else setLoading(true, false);
     const src = new EventSource(RELATIVE_ROOT + "stream?" + p.toString());
     state.source = src;
     src.onopen = function () { setStatus(""); };
@@ -289,6 +309,9 @@ function connect() {
         el["loading"].classList.remove("indeterminate");
         el["loading"].style.backgroundSize = Math.min(100, Math.round(p.d * 100 / p.t)) + "% 100%";
     });
+    src.addEventListener("live", function () {
+        setLoading(false); // tail's initial catch-up is rendered; now following
+    });
     src.addEventListener("eof", function () {
         if (entry && state.file && state.file.stale) entry.done = true; // archives are immutable
         logview.flush(); // render what's still queued before judging the jump target
@@ -305,6 +328,76 @@ function connect() {
         src.close(); state.source = null; setStatus("");
     });
     src.onerror = function () { setStatus("reconnecting…"); };
+}
+
+// Find mode: ask the server for the first matches per file (with context) and
+// render them. findSeq guards against a stale response arriving after the user
+// already switched to another view.
+let findSeq = 0;
+async function findRequest() {
+    const seq = ++findSeq;
+    if (!state.filter) { setStatus("enter a search (regexp)"); return; }
+    setLoading(true);
+    const p = new URLSearchParams({ q: state.filter });
+    if (state.file.all) {
+        p.set("all", "1");
+        if (state.file.scope) p.set("scope", state.file.scope);
+    } else {
+        p.set("path", state.file.path);
+    }
+    if (state.mode === "find-all") p.set("stale", "1");
+
+    let results;
+    try {
+        const resp = await fetch(RELATIVE_ROOT + "find?" + p.toString());
+        if (!resp.ok) throw new Error(await resp.text());
+        results = await resp.json();
+    } catch (err) {
+        if (seq === findSeq) { setLoading(false); setStatus("search failed: " + err.message); }
+        return;
+    }
+    if (seq !== findSeq) return; // another view took over while we waited
+    setLoading(false);
+    renderFind(results);
+}
+
+// renderFind shows each file's hits with dimmed context, one block per file
+// separated by a rule. Clicking a file header opens the complete file with its
+// first match selected; the result lines select and copy like any others.
+function renderFind(results) {
+    logview.clear();
+    if (!results.length) { setStatus("no matches"); return; }
+    const frag = document.createDocumentFragment();
+    const addLine = function (text, cls) {
+        const span = document.createElement("span");
+        span.className = "log-entry " + cls;
+        appendAnsi(span, text);
+        frag.appendChild(span);
+        logview.lines.push(span);
+    };
+    for (const f of results) {
+        const n = f.matches.length;
+        const head = document.createElement("div");
+        head.className = "find-file";
+        head.textContent = stripPrefix(f.path) + " — " + (n >= 10 ? "10+" : n) + (n === 1 ? " match" : " matches");
+        head.dataset.path = f.path;
+        head.dataset.text = f.matches[0].text;
+        head.title = "open " + f.path;
+        frag.appendChild(head);
+        f.matches.forEach(function (m, i) {
+            if (i) {
+                const gap = document.createElement("div");
+                gap.className = "find-gap";
+                gap.textContent = "···";
+                frag.appendChild(gap);
+            }
+            for (const t of m.before) addLine(t, "ctx");
+            addLine(m.text, "match");
+            for (const t of m.after) addLine(t, "ctx");
+        });
+    }
+    el["logview"].appendChild(frag);
+    el["scrollable"].scrollTop = 0;
 }
 
 // stripPrefix hides the directory prefix common to every served file — with a
@@ -330,20 +423,26 @@ function jumpToFile(path, text) {
     if (i < 0) return;
     el["file-select"].value = String(i);
     state.file = state.files[i];
-    state.mode = "grep";
+    state.mode = "grep"; // "view": the complete file
     el["mode-select"].value = "grep";
+    // The complete file, unfiltered — a leftover filter (or find query) would
+    // hide the context around the jump target.
+    state.filter = "";
+    el["filter-input"].value = "";
     updateDownload();
     syncModeOptions();
     connect(); // clears the view — set the jump target after
-    logview.locate = text !== undefined ? text : null;
+    // Normalize to rendered form: find results carry raw text whose ANSI
+    // escapes the view strips, and locate compares stripped against stripped.
+    logview.locate = text !== undefined ? text.replace(ANSI_RE, "") : null;
 }
 
 // syncModeOptions disables "tail" while a rotated/compressed file is selected
-// (it will never grow, so it can only be grepped) and switches to grep. It only
-// adjusts state — the caller connects.
+// (it will never grow) and switches to "view". It only adjusts state — the
+// caller connects.
 function syncModeOptions() {
     const stale = state.file && state.file.stale;
-    el["mode-select"].options[MODES.indexOf("tail")].disabled = !!stale;
+    el["mode-select"].options[0].disabled = !!stale; // options[0] is "tail"
     if (stale && state.mode === "tail") {
         state.mode = "grep";
         el["mode-select"].value = "grep";
@@ -363,7 +462,7 @@ async function refreshFiles() {
     el["file-select"].add(new Option("All files", "0"));
     state.files.push({ path: "", all: true });
 
-    // Offer each subfolder as a "tail/grep everything under here" entry. A folder
+    // Offer each subfolder as a "tail/find everything under here" entry. A folder
     // is any ancestor directory holding some — but not all — of the files; one
     // holding all of them would just duplicate "All files", so it is skipped.
     const counts = {};
@@ -377,8 +476,40 @@ async function refreshFiles() {
     Object.keys(counts).filter(function (d) { return counts[d] < data.length; }).sort()
         .forEach(function (d) {
             el["file-select"].add(new Option("▸ " + stripPrefix(d) + "/", String(state.files.length)));
-            state.files.push({ path: d, scope: d, all: true });
+            state.files.push({ path: d, scope: d + "/", all: true });
         });
+
+    // Also group files sharing a name prefix (cut at . - _), e.g. two hosts
+    // logging as 192.168.1.5.log and 192.168.1.22.log yield "▸ 192.168.1*",
+    // selectable for tail and find like a folder. Only maximal prefixes
+    // matching ≥2 files are offered, and none that just mirror a directory.
+    const dirTotals = {};
+    data.forEach(function (e) {
+        const dir = e.path.slice(0, e.path.lastIndexOf("/") + 1);
+        dirTotals[dir] = (dirTotals[dir] || 0) + 1;
+    });
+    const nameGroups = {};
+    data.forEach(function (e) {
+        const dir = e.path.slice(0, e.path.lastIndexOf("/") + 1);
+        const base = e.path.slice(dir.length);
+        for (let i = 1; i < base.length; i++) {
+            if (".-_".indexOf(base[i]) >= 0) {
+                const p = dir + base.slice(0, i);
+                nameGroups[p] = (nameGroups[p] || 0) + 1;
+            }
+        }
+    });
+    Object.keys(nameGroups).filter(function (p) {
+        const dir = p.slice(0, p.lastIndexOf("/") + 1);
+        if (nameGroups[p] < 2 || nameGroups[p] === dirTotals[dir]) return false;
+        // Keep only the longest prefix naming this same group of files.
+        return !Object.keys(nameGroups).some(function (q) {
+            return q !== p && q.indexOf(p) === 0 && nameGroups[q] === nameGroups[p];
+        });
+    }).sort().forEach(function (p) {
+        el["file-select"].add(new Option("▸ " + stripPrefix(p) + "*", String(state.files.length)));
+        state.files.push({ path: p, scope: p, all: true });
+    });
 
     data.forEach(function (entry) {
         const label = stripPrefix(entry.path) + (entry.stale ? "  (archived)" : "");
@@ -404,19 +535,25 @@ function updateDownload() {
 }
 
 function applyFilter() {
-    if (el["filter-input"].value === state.filter) return; // no change, no reconnect
+    const changed = el["filter-input"].value !== state.filter;
+    const finding = state.mode.indexOf("find") === 0;
+    if (!changed && !finding) return; // tail/view: same filter, no reconnect
     state.filter = el["filter-input"].value;
-    connect();
+    connect(); // find re-runs even unchanged: Enter or the button means "search now"
 }
 
 function init() {
-    MODES.forEach(function (m) { el["mode-select"].add(new Option(m, m)); });
+    MODES.forEach(function (m) { el["mode-select"].add(new Option(m.label, m.value)); });
     el["mode-select"].value = state.mode;
     el["mode-select"].onchange = function () { state.mode = el["mode-select"].value; connect(); };
 
     el["filter-input"].value = state.filter;
     el["filter-input"].addEventListener("keyup", function (e) { if (e.key === "Enter") applyFilter(); }); // Enter applies
-    el["filter-input"].addEventListener("change", applyFilter); // and so does focus loss
+    el["filter-input"].addEventListener("change", function () {
+        // Focus loss applies the tail/view filter, but never launches a find:
+        // a search fires only deliberately, on Enter or the button.
+        if (state.mode.indexOf("find") !== 0) applyFilter();
+    });
     el["filter-apply"].onclick = applyFilter;
 
     // One delegated listener serves every line (logview.flush attaches no
@@ -435,6 +572,11 @@ function init() {
             // The raw line text follows the "prefix: " nodes.
             const text = entry.textContent.slice(e.target.textContent.length + 2);
             jumpToFile(e.target.dataset.path, text);
+            return;
+        }
+        const head = plain && e.target.closest(".find-file");
+        if (head) {
+            jumpToFile(head.dataset.path, head.dataset.text); // the complete file, first match selected
             return;
         }
         if (!window.getSelection().isCollapsed) return; // text drag-select, not a line click

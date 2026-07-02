@@ -163,9 +163,26 @@ body {
 }
 #logview .log-entry.selected:hover { background: rgba(255, 151, 79, 0.24); }
 
-/* The per-line file prefix in multi-file streams: click to grep that file. */
+/* The per-line file prefix in multi-file streams: click to open that file. */
 #logview .path-link { color: #8a8f98; cursor: pointer; }
 #logview .path-link:hover { color: var(--notice); text-decoration: underline; }
+
+/* Find mode: one block per file, separated by a rule. The header opens the
+   complete file with the first match selected; context lines are dimmed and
+   match lines carry a faint warm tint. "···" separates match groups. */
+#logview .find-file {
+    display: block;
+    margin-top: 10px;
+    padding: 6px 8px 2px;
+    border-top: 1px solid #3a3e44;
+    color: var(--notice);
+    font-weight: bold;
+    cursor: pointer;
+}
+#logview .find-file:hover { text-decoration: underline; }
+#logview .log-entry.ctx { color: #8a8f98; }
+#logview .log-entry.match { background: rgba(255, 151, 79, 0.08); }
+#logview .find-gap { color: #555a62; padding: 2px 8px; user-select: none; }
 
 /* Toast: brief confirmation (e.g. "3 lines copied"), bottom-center. */
 #toast {

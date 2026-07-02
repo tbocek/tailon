@@ -220,7 +220,7 @@ func TestStreamFollow(t *testing.T) {
 	scanner := bufio.NewScanner(resp.Body)
 	readData := func() string {
 		for scanner.Scan() {
-			if d, ok := strings.CutPrefix(scanner.Text(), "data: "); ok {
+			if d, ok := strings.CutPrefix(scanner.Text(), "data: "); ok && d != "" {
 				var f sseFrame
 				json.Unmarshal([]byte(d), &f)
 				return f.T
@@ -339,7 +339,7 @@ func TestStreamScopedSubfolder(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
 	defer srv.Close()
 
-	scope := filepath.Join(dir, "host1")
+	scope := filepath.Join(dir, "host1") + "/" // the client sends directory scopes with a trailing slash
 	resp, err := http.Get(srv.URL + "?mode=grep&all=1&scope=" + url.QueryEscape(scope))
 	if err != nil {
 		t.Fatal(err)
@@ -538,6 +538,123 @@ func TestStreamReset(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"t":"1"`) {
 		t.Fatalf("expected the stream to restart from the top, got:\n%s", body)
+	}
+}
+
+// TestFindHandler checks the bounded server-side search: matches with context,
+// the per-file cap, archive inclusion via stale=1, and input validation.
+func TestFindHandler(t *testing.T) {
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 40; i++ {
+		if i == 15 || i == 30 {
+			lines = append(lines, "needle here")
+		} else {
+			lines = append(lines, "filler")
+		}
+	}
+	os.WriteFile(filepath.Join(dir, "a.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.log"), []byte("nothing to see\n"), 0o644)
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte("archived needle\n"))
+	zw.Close()
+	os.WriteFile(filepath.Join(dir, "old.log.gz"), gz.Bytes(), 0o644)
+
+	config = defaultConfig()
+	config.Sources = []string{dir}
+	createListing(config.Sources)
+
+	srv := httptest.NewServer(http.HandlerFunc(findHandler))
+	defer srv.Close()
+
+	get := func(params string) []findResult {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "?" + params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out []findResult
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		return out
+	}
+
+	// Live files only: one file, two matches, full context on both sides.
+	res := get("q=needle&all=1")
+	if len(res) != 1 || !strings.HasSuffix(res[0].Path, "a.log") || len(res[0].Matches) != 2 {
+		t.Fatalf("unexpected results: %+v", res)
+	}
+	m := res[0].Matches[0]
+	if m.Text != "needle here" || len(m.Before) != findCtxLines || len(m.After) != findCtxLines {
+		t.Fatalf("context wrong: before=%d after=%d text=%q", len(m.Before), len(m.After), m.Text)
+	}
+
+	// stale=1 also searches the archive, decoded.
+	res = get("q=needle&all=1&stale=1")
+	if len(res) != 2 {
+		t.Fatalf("expected the archive to match too, got %+v", res)
+	}
+
+	// The per-file cap: a file where everything matches yields findMaxMatches.
+	res = get("q=.&all=1")
+	if len(res[0].Matches) != findMaxMatches {
+		t.Fatalf("cap: got %d matches", len(res[0].Matches))
+	}
+
+	// Validation and allow-listing.
+	for _, c := range []struct {
+		params string
+		code   int
+	}{
+		{"q=", http.StatusBadRequest},
+		{"q=%28", http.StatusBadRequest}, // "(" — invalid regexp
+		{"q=x&path=/etc/passwd", http.StatusNotFound},
+	} {
+		resp, err := http.Get(srv.URL + "?" + c.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.code {
+			t.Errorf("%q: status %d, want %d", c.params, resp.StatusCode, c.code)
+		}
+	}
+}
+
+// TestStreamLive checks tail signals the end of its initial catch-up read, so
+// the client can hide the loading bar shown just for the initial load.
+func TestStreamLive(t *testing.T) {
+	setupConfig(t, "testdata/ex1/var/log/1.log")
+	srv := httptest.NewServer(http.HandlerFunc(streamHandler))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "?mode=tail&nlines=2&path=testdata/ex1/var/log/1.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	found := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if scanner.Text() == "event: live" {
+				found <- true
+				return
+			}
+		}
+		found <- false
+	}()
+	select {
+	case ok := <-found:
+		if !ok {
+			t.Fatal("stream ended without a live event")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the live event")
 	}
 }
 

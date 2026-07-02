@@ -181,14 +181,15 @@ func allowedFiles() []string {
 	return names
 }
 
-// allowedUnder returns the served files beneath the directory prefix,
-// recursively. It backs the per-subfolder stream, which tails or greps just the
-// logs under one directory. Filtering the existing allowlist keeps it safe — no
-// path outside the served set can match.
+// allowedUnder returns the served files whose path starts with prefix — a
+// directory (the client sends "dir/") or any path prefix such as
+// ".../192.168.1", so a group of hosts, or a file together with its rotated
+// archives, scope the same way. Filtering the existing allowlist keeps it
+// safe — no path outside the served set can match.
 func allowedUnder(prefix string) []string {
 	var sel []string
 	for _, p := range allowedFiles() {
-		if strings.HasPrefix(p, prefix+"/") {
+		if strings.HasPrefix(p, prefix) {
 			sel = append(sel, p)
 		}
 	}

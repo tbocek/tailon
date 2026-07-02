@@ -18,6 +18,12 @@ import (
 // pollInterval is how often follow mode checks a file for newly appended data.
 const pollInterval = 250 * time.Millisecond
 
+// posCaughtUp, sent once per followed file as a line's pos, marks the end of
+// its initial catch-up read: from here on, only newly appended data follows.
+// The server turns the last one into an SSE "live" event so the client can
+// hide its loading bar.
+const posCaughtUp = -2
+
 // streamFile sends each line of the file at path to send, along with the byte
 // offset just past that line (-1 when unknown) — the client caches lines and
 // resumes from the offset, since served files only ever grow. In follow mode it
@@ -51,6 +57,7 @@ func streamFile(ctx context.Context, path string, follow bool, nlines int, start
 
 	var partial []byte
 	var prev os.FileInfo
+	caughtUp := false
 
 	var w *fileWatch
 	if follow {
@@ -67,6 +74,10 @@ func streamFile(ctx context.Context, path string, follow bool, nlines int, start
 		if err != nil {
 			if !follow {
 				return
+			}
+			if !caughtUp {
+				caughtUp = true
+				send("", posCaughtUp) // nothing to catch up on: live immediately
 			}
 			if !w.wait(ctx) {
 				return
@@ -113,6 +124,10 @@ func streamFile(ctx context.Context, path string, follow bool, nlines int, start
 
 		if !follow {
 			return
+		}
+		if !caughtUp {
+			caughtUp = true
+			send("", posCaughtUp) // the backlog is rendered; what follows is live
 		}
 		if !w.wait(ctx) {
 			return

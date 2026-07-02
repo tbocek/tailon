@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -36,6 +38,7 @@ func setupRoutes(relativeroot string) *http.ServeMux {
 	})
 	router.HandleFunc(relativeroot+"list", listHandler)
 	router.HandleFunc(relativeroot+"stream", streamHandler)
+	router.HandleFunc(relativeroot+"find", findHandler)
 	router.HandleFunc(relativeroot+"files/", downloadHandler)
 	router.HandleFunc(relativeroot+"", indexHandler)
 
@@ -142,6 +145,147 @@ func loggingHandler(out io.Writer, next http.Handler) http.Handler {
 			host, start.Format("02/Jan/2006:15:04:05 -0700"),
 			r.Method+" "+r.RequestURI+" "+r.Proto, rec.status, rec.bytes)
 	})
+}
+
+// findMaxMatches and findCtxLines bound a search: the first N matches per
+// file, each with C lines of context. The bound is why find stays fast on huge
+// logs — most scans stop long before the end of the file, and the response is
+// small no matter how large the input.
+const (
+	findMaxMatches = 10
+	findCtxLines   = 10
+)
+
+// findMatch is one search hit with its surrounding lines.
+type findMatch struct {
+	Before []string `json:"before"`
+	Text   string   `json:"text"`
+	After  []string `json:"after"`
+}
+
+// findResult groups one file's hits.
+type findResult struct {
+	Path    string      `json:"path"`
+	Matches []findMatch `json:"matches"`
+}
+
+// findHandler searches the selected files server-side and returns JSON — the
+// fast alternative to streaming whole files to the browser. Query parameters:
+// q (RE2 regexp), then path / all=1 / scope as in /stream; stale=1 also
+// searches rotated archives (decoded transparently).
+func findHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if query.Get("q") == "" {
+		http.Error(w, "empty search", http.StatusBadRequest)
+		return
+	}
+	re, err := regexp.Compile(query.Get("q"))
+	if err != nil {
+		http.Error(w, "invalid search: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var paths []string
+	if query.Get("all") == "1" {
+		if scope := query.Get("scope"); scope != "" {
+			paths = allowedUnder(scope)
+		} else {
+			paths = allowedFiles()
+		}
+		if query.Get("stale") != "1" {
+			live := paths[:0]
+			for _, p := range paths {
+				if !isStale(p) {
+					live = append(live, p)
+				}
+			}
+			paths = live
+		}
+	} else {
+		path := query.Get("path")
+		if !fileAllowed(path) {
+			http.Error(w, "unknown file", http.StatusNotFound)
+			return
+		}
+		paths = []string{path}
+	}
+
+	// Scan the files concurrently; each stops at its match cap.
+	matches := make([][]findMatch, len(paths))
+	var wg sync.WaitGroup
+	for i, p := range paths {
+		wg.Add(1)
+		go func(i int, p string) { defer wg.Done(); matches[i] = findInFile(r.Context(), p, re) }(i, p)
+	}
+	wg.Wait()
+
+	results := []findResult{}
+	for i, p := range paths {
+		if len(matches[i]) > 0 {
+			results = append(results, findResult{Path: p, Matches: matches[i]})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+// findInFile returns the first findMaxMatches hits in the file (decoded if
+// compressed), each with up to findCtxLines lines of context on both sides. It
+// reads line-buffered and returns as soon as the last hit's after-context is
+// complete, so a scan rarely reads the whole file. A cancelled request (the
+// client navigated away) stops the scan instead of running it to the end.
+func findInFile(ctx context.Context, path string, re *regexp.Regexp) []findMatch {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var rd io.Reader = f
+	if d := decoder(path); d != nil {
+		if rd, err = d(f); err != nil {
+			return nil
+		}
+	}
+
+	br := bufio.NewReader(rd)
+	var ring []string // the last findCtxLines lines, before-context for the next hit
+	var hits []findMatch
+	for n := 0; ; n++ {
+		if n%1024 == 0 && ctx.Err() != nil {
+			return hits
+		}
+		line, err := br.ReadString('\n')
+		line = strings.TrimRight(line, "\r\n")
+		if line != "" || err == nil {
+			// Every line first serves as after-context for the open hits (a
+			// matching line inside another's context included, like grep -C).
+			complete := true
+			for i := range hits {
+				if len(hits[i].After) < findCtxLines {
+					hits[i].After = append(hits[i].After, line)
+					complete = complete && len(hits[i].After) == findCtxLines
+				}
+			}
+			if len(hits) < findMaxMatches && re.MatchString(line) {
+				hits = append(hits, findMatch{
+					Before: append([]string{}, ring...),
+					Text:   line,
+					After:  []string{},
+				})
+				complete = false
+			}
+			if ring = append(ring, line); len(ring) > findCtxLines {
+				ring = ring[1:]
+			}
+			if len(hits) == findMaxMatches && complete {
+				break // cap reached and every context is full: stop reading
+			}
+		}
+		if err != nil {
+			return hits
+		}
+	}
+	return hits
 }
 
 // mergeInterval is how often all-files mode flushes its buffer of lines, sorted
@@ -317,6 +461,20 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 	matches := func(text string) bool {
 		return filter == nil || filter.MatchString(text) != invert
 	}
+	// In tail mode, each file reports once when its initial catch-up read is
+	// done; after the last one the client may hide its loading bar. This only
+	// concerns the initial load — the stream then just keeps following.
+	catchingUp := len(paths)
+	caughtUp := func(ln logLine) bool {
+		if ln.pos != posCaughtUp {
+			return false
+		}
+		if catchingUp--; catchingUp == 0 {
+			fmt.Fprint(w, "event: live\ndata: \n\n")
+			rc.Flush()
+		}
+		return true
+	}
 	writeLine := func(ln logLine) bool {
 		frame := struct {
 			Path string `json:"p,omitempty"` // set when several files are streamed
@@ -352,6 +510,9 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					writeEOF()
 					return
+				}
+				if caughtUp(ln) {
+					continue
 				}
 				if !progress(ln.path, ln.pos) {
 					return
@@ -413,6 +574,9 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 				flush()
 				writeEOF()
 				return
+			}
+			if caughtUp(ln) {
+				continue
 			}
 			if !progress(ln.path, ln.pos) {
 				return
